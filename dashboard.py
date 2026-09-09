@@ -165,6 +165,15 @@ class LocalServer(ThreadingHTTPServer):
         super().server_bind()
 
 
+# Served without a token, exactly like '/' — the 127.0.0.1 bind and the Host
+# check are the boundary, and a <script src> cannot send an auth header anyway.
+# An explicit allow-list, never a path built from the request, so no traversal.
+# The type must be exact: send() sets X-Content-Type-Options: nosniff, and a
+# wrong type means the browser silently refuses to run the script.
+STATIC = {'/app.js': ('app.js', 'text/javascript'),
+          '/app.css': ('app.css', 'text/css')}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -187,6 +196,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.send({'error': 'Invalid host'}, 403)
         if self.path == '/':
             return self.send((FOLDER/'dashboard.html').read_text(encoding='utf-8').replace('__TOKEN__', TOKEN), kind='text/html')
+        if self.path in STATIC:
+            name, kind = STATIC[self.path]
+            asset = FOLDER/name
+            if not asset.exists():
+                return self.send({'error': 'Not found'}, 404)
+            return self.send(asset.read_text(encoding='utf-8'), kind=kind)
         if self.path == '/favicon.ico':
             icon = FOLDER/'cfb-icon.ico'
             if not icon.exists():

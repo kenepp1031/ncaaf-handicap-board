@@ -1,8 +1,11 @@
+import tempfile
 import unittest
 from pathlib import Path
 import jscheck
 
-PAGE = Path(__file__).resolve().parent/'dashboard.html'
+FOLDER = Path(__file__).resolve().parent
+PAGE = FOLDER/'dashboard.html'
+APP_JS = FOLDER/'app.js'
 # The exact shape that shipped broken: the false branch of a ternary inside a
 # template expression opened a string it never closed, so the browser refused
 # the entire script and the dashboard rendered nothing.
@@ -49,15 +52,33 @@ class ScannerTests(unittest.TestCase):
 
 
 class DashboardPageTests(unittest.TestCase):
-    def test_the_shipped_dashboard_script_parses(self):
-        self.assertGreaterEqual(jscheck.check_html(PAGE.read_text(encoding='utf-8')), 1)
+    def test_the_shipped_page_and_every_script_it_loads_parse(self):
+        # The bootstrap in the page plus app.js.
+        self.assertGreaterEqual(jscheck.check_page(FOLDER), 2)
 
-    def test_reintroducing_the_original_break_into_the_real_page_is_caught(self):
-        html = PAGE.read_text(encoding='utf-8')
-        self.assertIn("${printing?marketLine(e):''}", html)
-        broken = html.replace("${printing?marketLine(e):''}", "${printing?marketLine(e):'}", 1)
+    def test_reintroducing_the_original_break_is_caught(self):
+        source = APP_JS.read_text(encoding='utf-8')
+        self.assertIn("${printing?marketLine(e):''}", source)
+        broken = source.replace("${printing?marketLine(e):''}", "${printing?marketLine(e):'}", 1)
         with self.assertRaises(jscheck.JsSyntaxError):
-            jscheck.check_html(broken)
+            jscheck.check(broken, 'app.js')
+
+    def test_a_broken_external_script_is_caught_through_the_page(self):
+        with tempfile.TemporaryDirectory() as folder:
+            here = Path(folder)
+            (here/'page.html').write_text('<script>window.T="x";</script><script src="/broken.js"></script>',
+                                          encoding='utf-8')
+            (here/'broken.js').write_text("let a='unterminated;\n", encoding='utf-8')
+            with self.assertRaises(jscheck.JsSyntaxError):
+                jscheck.check_page(here, 'page.html')
+
+    def test_a_page_whose_scripts_all_parse_reports_how_many_it_checked(self):
+        with tempfile.TemporaryDirectory() as folder:
+            here = Path(folder)
+            (here/'page.html').write_text('<script>window.T="x";</script><script src="/ok.js"></script>',
+                                          encoding='utf-8')
+            (here/'ok.js').write_text('const a = 1;\n', encoding='utf-8')
+            self.assertEqual(jscheck.check_page(here, 'page.html'), 2)
 
 
 if __name__ == '__main__':

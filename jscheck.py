@@ -12,6 +12,7 @@ not correctness. Run the page once in a browser after editing the script.
 import re
 
 SCRIPT = re.compile(r'<script\b[^>]*>(.*?)</script>', re.S | re.I)
+SRC = re.compile(r'<script\b[^>]*\bsrc=["\']([^"\']+)["\']', re.I)
 # A '/' after one of these ends an expression, so the next '/' opens a regex
 # rather than dividing. Everything else in IDENT_END means division.
 IDENT_END = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$)]}')
@@ -24,7 +25,13 @@ class JsSyntaxError(ValueError):
 
 
 def scripts(html):
-    return [m.group(1) for m in SCRIPT.finditer(html)]
+    """Inline script bodies. A src'd tag has no body, so it is skipped here."""
+    return [m.group(1) for m in SCRIPT.finditer(html) if m.group(1).strip()]
+
+
+def external(html):
+    """Local script URLs the page pulls in, in document order."""
+    return [src for src in SRC.findall(html) if not src.startswith(('http:', 'https:', '//'))]
 
 
 def _regex_allowed(source, i):
@@ -136,6 +143,21 @@ def check(source, label='script'):
     if top['braces']:
         fail('unbalanced { }', line)
     return True
+
+
+def check_page(folder, page='dashboard.html'):
+    """Check the page's inline scripts and every local file it loads.
+
+    Following the <script src> tags rather than hard-coding a filename means
+    adding a second script to the page cannot quietly escape the check.
+    """
+    html = (folder/page).read_text(encoding='utf-8')
+    checked = check_html(html, page)
+    for src in external(html):
+        name = src.lstrip('/')
+        check((folder/name).read_text(encoding='utf-8'), name)
+        checked += 1
+    return checked
 
 
 def check_html(html, label='dashboard.html'):
