@@ -202,7 +202,7 @@ def fit(stored, ratings, names):
     the model exactly as it was.
     """
     fits = {}
-    for measure, field in MEASURES:
+    for measure, _ in MEASURES:
         table = stored.get(measure) or {}
         pairs = []
         for team_id, r in ratings.items():

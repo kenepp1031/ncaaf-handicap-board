@@ -36,6 +36,8 @@ Power Ranking also carries a Data health panel: feed counts, poll dates, the fit
 
 `data/picks.sqlite3` stores picks and captured market snapshots. `data/live.json` stores feeds. `nil.json` caches school spending and `servers.json` tracks running instances. `history-YYYY.json` caches prior-season scores, `locations.json` caches city coordinates, and `rank_history.json` preserves observed poll snapshots. Missing provider odds remain missing; no betting lines are invented. ATS history needs historical closing spreads and may be unavailable even when scores exist.
 
-`weekly.py` is the alternate Tkinter tracker. `handicap.py`, `rankings.py`, `make_demo.py` and CSV templates are retained command-line/legacy workflows; they are not the desktop browser entry point.
+`handicap.py` holds the rating model `power.py` fits, plus a command-line `ratings`/`predict`/`backtest` interface over CSV files. The dashboard uses only its `Model` class.
+
+The project is a git repository; `data/picks.sqlite3` and `data/rank_history.json` are tracked because neither can be recovered if lost, while the large refetchable caches are ignored.
 
 Run `python -m unittest discover` for regression checks. `test_jscheck.py` also proves the dashboard's inline script still parses — an unterminated string there stops the browser reading the whole `<script>` and the page renders nothing, which no other test would catch. It is a structural check, so still load the page once after editing the script. See `CHANGELOG-2026-09-09.md` for the detailed changes and audit.

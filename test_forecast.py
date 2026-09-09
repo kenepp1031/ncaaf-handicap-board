@@ -20,7 +20,7 @@ class ForecastTests(unittest.TestCase):
             folder=Path(tmp)
             (folder/'locations.json').write_text(json.dumps({'Test|TX|USA':{'latitude':30,'longitude':-97}}))
             with patch('feeds.fetch',return_value=json.dumps({'hourly':hourly})) as fetch:
-                add_weather(events,folder,'2026-09-12','2026-09-12',set())
+                add_weather(events,folder,'2026-09-12','2026-09-12')
             self.assertIn('hourly=',fetch.call_args.args[0])
             self.assertNotIn('current=',fetch.call_args.args[0])
         self.assertEqual(events[0]['weather']['wind_speed_10m'],16)

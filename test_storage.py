@@ -1,8 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from datetime import date
-from weekly import Store, monday, settle
+from storage import Store, settle
 
 
 def pick(**updates):
@@ -37,10 +36,6 @@ class TrackerTests(unittest.TestCase):
             self.assertEqual(b.all(), s.all())
             b.db.close()
             s.db.close()
-
-    def test_week_boundary(self):
-        self.assertEqual(monday(date(2026, 9, 13)), date(2026, 9, 7))
-        self.assertEqual(monday(date(2026, 9, 14)), date(2026, 9, 14))
 
     def test_auto_grading_preserves_picked_line(self):
         s = Store(':memory:')

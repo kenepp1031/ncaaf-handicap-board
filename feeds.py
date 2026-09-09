@@ -146,7 +146,7 @@ STATES = dict(zip('AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD M
     'Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New Hampshire|New Jersey|New Mexico|New York|North Carolina|North Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode Island|South Carolina|South Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West Virginia|Wisconsin|Wyoming'.split('|')))
 
 
-def add_weather(events, folder, start, end, top_ids):
+def add_weather(events, folder, start, end):
     path = folder/'locations.json'
     locations = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
     targets = {}
@@ -299,7 +299,7 @@ def refresh(folder, week_start, full_season=False, week_end=None):
                 'number':int(entry['value']), 'label':entry['label'] if int(period['value'])==2 else period['label']+' '+entry['label'],
                 'start':entry['startDate'],'end':entry['endDate'],'detail':entry.get('detail','')})
     try:
-        count,total = add_weather(list(events.values()),folder,week_start.isoformat(),(week_end or week_start+timedelta(days=6)).isoformat(),set(combined))
+        count,total = add_weather(list(events.values()),folder,week_start.isoformat(),(week_end or week_start+timedelta(days=6)).isoformat())
         if count<total:
             warnings.append(f'Weather available for {count}/{total} venue cities; missing locations are marked unavailable.')
     except Exception as e:

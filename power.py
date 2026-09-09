@@ -416,4 +416,4 @@ def build(payload, as_of, spend=None):
             'spend_fit': spend_fits, 'spend_board': nil.leaderboard(spend) if spend else None,
             'spend_labels': (spend or {}).get('labels'),
             'spend_source': (spend or {}).get('source'), 'spend_fetched_at': (spend or {}).get('fetched_at'),
-            'spend_max_weight': nil.MAX_WEIGHT, 'spend_fade_games': nil.FADE_GAMES}
+            'spend_fade_games': nil.FADE_GAMES}
