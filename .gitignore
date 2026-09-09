@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+
+# Atomic-write temporaries
+*.tmp
+
+# Runtime state — data/servers.json also holds a live shutdown token
+data/servers.json
+
+# Refetchable caches. Large, and any refresh rebuilds them from the feeds.
+data/live.json
+data/history-*.json
+data/locations.json
+data/nil.json
+
+# Deliberately NOT ignored, because neither can be recovered if lost:
+#   data/picks.sqlite3     your saved picks and wagers
+#   data/rank_history.json archived poll snapshots; ESPN only ever serves the
+#                          current poll, so a missing week is missing forever

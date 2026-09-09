@@ -1,0 +1,304 @@
+"""Launch the Python pick tracker in a local browser. Data stays in SQLite."""
+import json
+import math
+import os
+import secrets
+import socket
+import threading
+import webbrowser
+from datetime import date, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from storage import Store, settle, summary
+from feeds import refresh
+import nil
+import power
+import servers
+
+FOLDER = Path(__file__).resolve().parent
+DATA = FOLDER/'data'
+DATA.mkdir(exist_ok=True)
+TOKEN = secrets.token_urlsafe(24)
+LOCK = threading.Lock()
+STATE = {'refreshing': False, 'error': '', 'data': {}}
+PENDING_SYNC = None
+
+
+def read_cache():
+    cache = DATA/'live.json'
+    return json.loads(cache.read_text(encoding='utf-8')) if cache.exists() else {}
+
+
+def _week_key(season, w):
+    return f"{season}-{w['type']}-{w['number']}"
+
+
+def snapshot_and_trend(payload, today):
+    """Record this week's combined Top 50 and report movement vs the last recorded week.
+
+    ESPN's public rankings feed only ever returns the current poll (verified:
+    the documented `week` parameter is ignored), so past weeks can't be
+    backfilled automatically. This starts a local weekly archive in
+    data/rank_history.json going forward — each week's entry keeps updating
+    while that week is current, then freezes once the next week begins.
+    """
+    weeks = payload.get('weeks', [])
+    current = next((w for w in weeks if w['start'][:10] <= today.isoformat() <= w['end'][:10]), None)
+    path = DATA/'rank_history.json'
+    history = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+    if current:
+        key = _week_key(payload['season'], current)
+        history[key] = {'label': current['label'], 'captured_at': datetime.now().astimezone().isoformat(timespec='seconds'),
+                         'ranks': {t['id']: t['rank'] for t in payload.get('top50', [])}}
+        temp = path.with_suffix('.tmp')
+        temp.write_text(json.dumps(history, indent=2), encoding='utf-8')
+        temp.replace(path)
+    trend = {}
+    if current:
+        key = _week_key(payload['season'], current)
+        ordered = sorted(history, key=lambda k: tuple(int(x) for x in k.split('-')))
+        idx = ordered.index(key)
+        if idx > 0:
+            prev_ranks = history[ordered[idx-1]]['ranks']
+            for t in payload.get('top50', []):
+                prev = prev_ranks.get(t['id'])
+                trend[t['id']] = 'new' if prev is None else prev-t['rank']
+    return trend, len(history)
+
+
+def add_power(payload):
+    if not payload.get('events'):
+        return payload
+    spend = {}
+    try:
+        spend = nil.refresh(DATA)
+        if spend.get('warning'):
+            payload.setdefault('warnings', []).append(spend['warning'])
+    except Exception as e:
+        payload.setdefault('warnings', []).append('School spending unavailable: '+str(e))
+    try:
+        payload['power'] = power.build(payload, date.today(), spend or None)
+    except Exception as e:
+        payload['power'] = None
+        payload.setdefault('warnings', []).append('Power ratings failed: '+str(e))
+    try:
+        payload['poll_trend'], payload['poll_history_weeks'] = snapshot_and_trend(payload, date.today())
+    except Exception as e:
+        payload['poll_trend'], payload['poll_history_weeks'] = {}, 0
+        payload.setdefault('warnings', []).append('Poll history tracking failed: '+str(e))
+    return payload
+
+
+def sync(full=False, week=None, week_end=None):
+    global PENDING_SYNC
+    with LOCK:
+        if STATE['refreshing']:
+            PENDING_SYNC = (full,week,week_end)
+            return
+        STATE['refreshing'] = True
+        STATE['error'] = ''
+    def worker():
+        global PENDING_SYNC
+        try:
+            today = date.today()
+            payload = refresh(DATA, week or today-timedelta(days=today.weekday()), full, week_end)
+            add_power(payload)
+            with LOCK:
+                s = Store(DATA/'picks.sqlite3')
+                try:
+                    s.apply_scores(payload['events'])
+                finally:
+                    s.db.close()
+                STATE['data'] = payload
+        except Exception as e:
+            with LOCK:
+                STATE['error'] = str(e)
+        finally:
+            with LOCK:
+                STATE['refreshing'] = False
+                pending,PENDING_SYNC = PENDING_SYNC,None
+            if pending:
+                sync(*pending)
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def validate_pick(body, prior, events):
+    fields = ['game_date', 'home', 'away', 'side', 'spread', 'odds', 'stake', 'home_score', 'away_score', 'notes']
+    v = {key: str(body.get(key, '')).strip() for key in fields}
+    v['game_date'] = date.fromisoformat(v['game_date']).isoformat()
+    if not v['home'] or not v['away'] or v['home'].casefold() == v['away'].casefold():
+        raise ValueError('Enter two different school names.')
+    if v['side'] not in ('Home', 'Away'):
+        raise ValueError('Choose your side.')
+    for key in ('spread', 'odds', 'stake'):
+        v[key] = float(v[key])
+        if not math.isfinite(v[key]):
+            raise ValueError('Enter finite numbers.')
+    if abs(v['odds']) < 100 or v['stake'] <= 0:
+        raise ValueError('American odds must be at least +100 or at most -100; units must be positive.')
+    for key in ('home_score', 'away_score'):
+        v[key] = int(v[key]) if v[key] else None
+        if v[key] is not None and v[key] < 0:
+            raise ValueError('Scores must be nonnegative integers.')
+    if (v['home_score'] is None) != (v['away_score'] is None):
+        raise ValueError('Enter both final scores or leave both blank.')
+    v['favorite'] = 1 if str(body.get('favorite', '')).strip().lower() in ('1', 'true', 'on') else 0
+    event_id = prior.get('event_id') if prior else body.get('event_id')
+    event = next((e for e in events if e['id'] == event_id), None)
+    if event_id and not event:
+        raise ValueError('Selected matchup is not in the saved schedule. Refresh first.')
+    if event and (v['home'] != event['home'] or v['away'] != event['away']):
+        raise ValueError('School names must match the selected event.')
+    v['event_id'] = event_id
+    v['market_snapshot'] = prior.get('market_snapshot') if prior else json.dumps(event) if event else None
+    if event and event['completed']:
+        v['home_score'], v['away_score'] = event['home_score'], event['away_score']
+    return v
+
+
+class LocalServer(ThreadingHTTPServer):
+    allow_reuse_address = False
+
+    def server_bind(self):
+        if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def send(self, data, status=200, kind='application/json'):
+        content = data.encode('utf-8') if isinstance(data, str) else json.dumps(data).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', kind+'; charset=utf-8')
+        self.send_header('Content-Length', str(len(content)))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.end_headers()
+        self.wfile.write(content)
+
+    def allowed(self):
+        return self.headers.get('Host') == f'127.0.0.1:{self.server.server_port}'
+
+    def do_GET(self):
+        if not self.allowed():
+            return self.send({'error': 'Invalid host'}, 403)
+        if self.path == '/':
+            return self.send((FOLDER/'dashboard.html').read_text(encoding='utf-8').replace('__TOKEN__', TOKEN), kind='text/html')
+        if self.path == '/favicon.ico':
+            icon = FOLDER/'cfb-icon.ico'
+            if not icon.exists():
+                return self.send({'error': 'Not found'}, 404)
+            content = icon.read_bytes()
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/x-icon')
+            self.send_header('Content-Length', str(len(content)))
+            self.send_header('Cache-Control', 'public, max-age=86400')
+            self.end_headers()
+            return self.wfile.write(content)
+        if self.path == '/api/ping':
+            return self.send({'app': servers.APP, 'port': self.server.server_port, 'pid': os.getpid()})
+        if self.headers.get('X-Tracker-Token') != TOKEN:
+            return self.send({'error': 'Unauthorized'}, 403)
+        if self.path == '/api/state':
+            with LOCK:
+                s = Store(DATA/'picks.sqlite3')
+                try:
+                    rows = s.all()
+                finally:
+                    s.db.close()
+                for r in rows:
+                    r['result'], r['profit_units'] = settle(r)
+                self.send(dict(STATE, picks=rows, all_summary=summary(rows), today=date.today().isoformat()))
+        else:
+            self.send({'error':'Not found'},404)
+
+    def do_POST(self):
+        if not self.allowed() or self.headers.get('X-Tracker-Token') != TOKEN:
+            return self.send({'error':'Unauthorized'},403)
+        try:
+            length = int(self.headers.get('Content-Length',0))
+            if length > 100000:
+                raise ValueError('Request too large')
+            body = json.loads(self.rfile.read(length))
+            if self.path == '/api/shutdown':
+                self.send({'ok': True})
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
+                return
+            if self.path == '/api/refresh':
+                sync(bool(body.get('full')), date.fromisoformat(body['week']),date.fromisoformat(body['week_end']) if body.get('week_end') else None)
+                return self.send({'ok':True})
+            if self.path == '/api/favorite':
+                with LOCK:
+                    s = Store(DATA/'picks.sqlite3')
+                    try:
+                        s.set_favorite(int(body['id']), bool(body.get('favorite')))
+                    finally:
+                        s.db.close()
+                return self.send({'ok':True})
+            if self.path != '/api/save':
+                return self.send({'error':'Not found'},404)
+            with LOCK:
+                s = Store(DATA/'picks.sqlite3')
+                try:
+                    rows = s.all()
+                    pick_id = int(body['id']) if body.get('id') else None
+                    prior = next((r for r in rows if r['id'] == pick_id), None)
+                    if pick_id and not prior:
+                        raise ValueError('Saved pick not found')
+                    v = validate_pick(body, prior, STATE['data'].get('events',[]))
+                    if not prior and any((v['event_id'] and r['event_id'] == v['event_id']) or (r['game_date'] == v['game_date'] and r['home'].casefold() == v['home'].casefold() and r['away'].casefold() == v['away'].casefold()) for r in rows):
+                        raise ValueError('You already saved this matchup. Use Edit beside your pick.')
+                    s.save(v, pick_id)
+                finally:
+                    s.db.close()
+            self.send({'ok':True})
+        except (ValueError, TypeError, KeyError) as e:
+            self.send({'error':str(e)},400)
+        except Exception as e:
+            self.send({'error':str(e)},500)
+
+
+def main():
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument('--no-browser',action='store_true')
+    p.add_argument('--stop',action='store_true',help='close every running tracker server and exit')
+    p.add_argument('--port',type=int,default=8768)
+    a = p.parse_args()
+    if a.stop:
+        servers.stop_all(DATA, (a.port,))
+        return
+    running = servers.find_running(DATA, (a.port,))
+    if running:
+        if not a.no_browser:
+            webbrowser.open(f'http://127.0.0.1:{running}')
+        print(f'The tracker is already running: http://127.0.0.1:{running}', flush=True)
+        return
+    STATE['data'] = add_power(read_cache())
+    try:
+        server = LocalServer(('127.0.0.1', a.port), Handler)
+    except OSError:
+        if not a.no_browser:
+            webbrowser.open(f'http://127.0.0.1:{a.port}')
+        print('The tracker is already running or its port is occupied.', flush=True)
+        return
+    url = f'http://127.0.0.1:{server.server_port}'
+    print('College football tracker:',url,flush=True)
+    servers.register(DATA, server.server_port, TOKEN)
+    sync(True)
+    if not a.no_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        servers.deregister(DATA, server.server_port)
+        server.server_close()
+
+
+if __name__ == '__main__':
+    main()
