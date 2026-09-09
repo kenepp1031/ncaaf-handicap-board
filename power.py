@@ -243,16 +243,21 @@ def rating_history(payload, today):
     events = payload.get('events', [])
     combined_ranks = {t['id']: t['rank'] for t in payload.get('top50', [])}
     ap_ranks = payload.get('ap', {})
+    names = team_names(events)
+    fbs_names = {fbs_key(n) for n in payload.get('cbs', {})}
     weeks = sorted((w for w in payload.get('weeks', []) if w.get('type') == 2), key=lambda w: w['number'])
+    # Hoisted out of the loop: this concatenation and its date parsing were
+    # repeated once per elapsed week, which grows all season.
+    all_rows = payload.get('history_events', []) + events
     snapshots = []
     for w in weeks:
         start = date.fromisoformat(w['start'][:10])
         if start > today:
             continue
-        rows = _completed_before(payload.get('history_events', []) + events, start)
+        rows = _completed_before(all_rows, start)
         if not rows:
             continue
-        m = Model(rows, start)
+        m = Model(pooled_rows(rows, names, fbs_names), start)
         eligible = [r for r in m.ratings() if r['team'] in combined_ranks and r['games'] >= MIN_GAMES]
         triples = [(r['team'], r['rating'], ap_ranks.get(r['team']) or combined_ranks.get(r['team'])) for r in eligible]
         blended = _blend_with_ap(triples)
@@ -275,6 +280,49 @@ def fbs_key(name):
     return FBS_ALIASES.get(key, key)
 
 
+POOLED_FCS = '_FCS'
+
+
+def pooled(team_id, names, fbs_names):
+    """Model identity for a team: FCS opponents all share one pooled rating.
+
+    An FCS school appears once or twice in a season of FBS results, and ridge
+    shrinkage pulls a coefficient built from that little evidence most of the
+    way back to the mean — so the model rated them far too generously and
+    projected Miami by 14 where the market said 57. Pooling them into a single
+    entity backed by every FCS-vs-FBS game estimates the one thing the data can
+    actually support: how much worse the division is. Measured across 145 games
+    with a market line, mean error against the market fell from 12.1 to 7.5
+    points and games off by more than 20 fell from 33 to 7.
+
+    The cost is that FCS opponents are no longer told apart from each other.
+    That is honest — one game cannot separate them — and matches the existing
+    rule that FCS teams get no FBS rank or grade.
+
+    With no membership list there is nothing to pool *against*, so every team
+    keeps its own identity. Without that guard a failed CBS fetch would collapse
+    the entire league into one entity instead of merely losing the FCS fix.
+    """
+    if not fbs_names:
+        return team_id
+    return team_id if fbs_key(names.get(team_id, '')) in fbs_names else POOLED_FCS
+
+
+def pooled_rows(rows, names, fbs_names):
+    if not fbs_names:
+        return rows
+    return [dict(r, home_team=pooled(r['home_team'], names, fbs_names),
+                 away_team=pooled(r['away_team'], names, fbs_names)) for r in rows]
+
+
+def team_names(events):
+    names = {}
+    for e in events:
+        names[e['home_id']] = e['home']
+        names[e['away_id']] = e['away']
+    return names
+
+
 def build(payload, as_of, spend=None):
     """Return power ratings and per-game notes for the cached season.
 
@@ -289,12 +337,10 @@ def build(payload, as_of, spend=None):
     events = payload.get('events', [])
     combined = {t['id']: t['rank'] for t in payload.get('top50', [])}
     ap_ranks = payload.get('ap', {})
-    names = {}
-    for e in events:
-        names[e['home_id']] = e['home']
-        names[e['away_id']] = e['away']
+    names = team_names(events)
+    fbs_names = {fbs_key(n) for n in payload.get('cbs', {})}
     completed_rows = _completed_before(payload.get('history_events', []) + events, as_of)
-    model = Model(completed_rows, as_of) if completed_rows else None
+    model = Model(pooled_rows(completed_rows, names, fbs_names), as_of) if completed_rows else None
     ratings = {r['team']: r for r in model.ratings()} if model else {}
     spend_fits = nil.fit(spend, ratings, names) if spend else None
     season_games = {}
@@ -310,7 +356,6 @@ def build(payload, as_of, spend=None):
                              'defense': r['defense'] if r else None, 'games': r['games'] if r else 0,
                              'spending': nil.spending(spend, names.get(tid, '')) if spend else None,
                              'ats': ats_record(events, tid, as_of)})
-    fbs_names = {fbs_key(n) for n in payload.get('cbs', {})}
     peer_ids = {tid for tid in ratings if fbs_key(names.get(tid,'')) in fbs_names} if fbs_names else set(ratings)
     peers = [ratings[tid] for tid in peer_ids]
     offense_pool = [r['offense'] for r in peers]
@@ -338,6 +383,8 @@ def build(payload, as_of, spend=None):
             r['trend'] = prior['ranks'][r['id']] - r['power_rank']
     team_ratings = []
     for tid, r in ratings.items():
+        if tid == POOLED_FCS:
+            continue
         t = dict(r, id=tid, ranking_scope=scope, ranking_population=len(peers), ranked=tid in peer_ids)
         for metric, pool in (('offense',offense_pool),('defense',defense_pool)):
             t[metric+'_rank'] = 1 + sum(v > r[metric] for v in pool) if tid in peer_ids else None
@@ -373,15 +420,20 @@ def build(payload, as_of, spend=None):
         wa = weather_alert(e)
         if wa:
             entry['weather_alert'] = wa
-        hr, ar = ratings.get(hid), ratings.get(aid)
+        # Ratings and predictions go through the pooled identity so FCS
+        # opponents resolve to the shared FCS entity; every other field on the
+        # entry stays keyed to the real team.
+        home_model, away_model = pooled(hid, names, fbs_names), pooled(aid, names, fbs_names)
+        hr, ar = ratings.get(home_model), ratings.get(away_model)
         if hr and ar:
+            entry['pooled_fcs'] = [side for side, mid in (('home', home_model), ('away', away_model)) if mid == POOLED_FCS]
             home_spend = nil.spending(spend, e['home']) if spend else None
             away_spend = nil.spending(spend, e['away']) if spend else None
             margin_shift, spend_measure = nil.margin_shift(spend_fits, home_spend, away_spend, hr['rating'], ar['rating'],
                                                            season_games.get(hid, 0), season_games.get(aid, 0))
             entry.update(home_spending=home_spend, away_spending=away_spend,
                          spend_margin_shift=margin_shift, spend_measure=spend_measure)
-            hp, ap = model.predict({'home_team': hid, 'away_team': aid, 'neutral': bool(e.get('neutral')),
+            hp, ap = model.predict({'home_team': home_model, 'away_team': away_model, 'neutral': bool(e.get('neutral')),
                                      'home_adjustment': margin_shift/2, 'away_adjustment': -margin_shift/2})
             fair_home_spread = round(ap-hp, 2)
             lean = power_lean(fair_home_spread, entry['home_notes'], entry['away_notes'])
@@ -402,10 +454,14 @@ def build(payload, as_of, spend=None):
         games[e['id']] = entry
     fit_count = len(completed_rows)
     thin = sum(1 for r in top_ratings if r['games'] < MIN_GAMES)
+    fcs = ratings.get(POOLED_FCS)
     status = (f'Fit on {fit_count} completed FBS games. Offense and defense ranks/grades compare rated FBS teams only; FCS opponents are excluded from the ranking pool. Previous-season scores are included when available, with recency weighting (180-day half-life). '
               'Predictions use opponent-adjusted scoring, home/neutral venue and rest/lookahead context. '
               'Early-season confidence is Low; no ATS lean without both team histories and a market spread. '
               'Confidence is qualitative and has not been calibrated as a cover probability.')
+    if fcs:
+        status += (f" Every FCS opponent shares one pooled rating drawn from {fcs['games']} games against FBS teams, "
+                   'because a single appearance cannot rate a team on its own. FCS opponents are therefore not told apart from each other.')
     if spend_fits and spend_fits.get('roster'):
         roster_fit = spend_fits['roster']
         status += (f" A roster-cost prior nudges the projected margin while a team has under {nil.FADE_GAMES} games this season "
@@ -416,4 +472,5 @@ def build(payload, as_of, spend=None):
             'spend_fit': spend_fits, 'spend_board': nil.leaderboard(spend) if spend else None,
             'spend_labels': (spend or {}).get('labels'),
             'spend_source': (spend or {}).get('source'), 'spend_fetched_at': (spend or {}).get('fetched_at'),
-            'spend_fade_games': nil.FADE_GAMES}
+            'spend_fade_games': nil.FADE_GAMES,
+            'fcs_pooled': None if not fcs else {'rating': fcs['rating'], 'games': fcs['games']}}

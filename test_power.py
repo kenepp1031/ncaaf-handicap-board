@@ -223,6 +223,54 @@ class HostileEnvironmentTests(unittest.TestCase):
         self.assertIsNotNone(power.hostile_environment_note('texas a&m', neutral=False))
 
 
+class PooledFcsTests(unittest.TestCase):
+    """Every FCS opponent shares one rating; see power.pooled for why."""
+
+    # Two FBS teams beat three different FCS schools badly, then host one of
+    # them again. Individually each FCS team has one result and ridge shrinkage
+    # rates it far too generously; pooled, they carry the weight of all four.
+    EVENTS = [played('h1', -6, 'P', 'X', 49, 3), played('h2', -6, 'Q', 'Y', 45, 7),
+              played('h3', -3, 'P', 'Z', 52, 0), played('h4', -3, 'Q', 'X', 38, 10),
+              played('h5', 1, 'P', 'Q', 24, 21),
+              played('up', 6, 'P', 'Z', 0, 0, completed=False, home_combined=1)]
+    CBS = {'teamp': 1, 'teamq': 2}
+
+    def build(self, **payload):
+        base = {'events': self.EVENTS, 'cbs': self.CBS,
+                'top50': [{'id': 'P', 'rank': 1}, {'id': 'Q', 'rank': 2}]}
+        base.update(payload)
+        return power.build(base, date(2026, 9, 5))
+
+    def test_the_pooled_entity_carries_every_fcs_game(self):
+        result = self.build()
+        self.assertEqual(result['fcs_pooled']['games'], 4)
+        self.assertIn('pooled rating', result['status'])
+
+    def test_a_game_against_an_fcs_team_still_gets_a_projection(self):
+        # Regression: ratings are keyed by pooled id, so looking them up by the
+        # real team id silently skipped projections for exactly these games.
+        game = self.build()['games']['up']
+        self.assertEqual(game['lean_source'], 'model')
+        self.assertIn('fair_home_spread', game)
+        self.assertEqual(game['pooled_fcs'], ['away'])
+
+    def test_an_fcs_opponent_projects_worse_than_an_fbs_one(self):
+        fcs = self.build()['games']['up']['fair_home_spread']
+        swapped = [e for e in self.EVENTS if e['id'] != 'up']
+        swapped.append(played('up', 6, 'P', 'Q', 0, 0, completed=False, home_combined=1, away_combined=2))
+        fbs = power.build({'events': swapped, 'cbs': self.CBS,
+                           'top50': [{'id': 'P', 'rank': 1}, {'id': 'Q', 'rank': 2}]},
+                          date(2026, 9, 5))['games']['up']['fair_home_spread']
+        self.assertLess(fcs, fbs, 'the FCS visitor must be a bigger underdog than a rated FBS one')
+
+    def test_per_team_fields_stay_keyed_to_the_real_team(self):
+        game = self.build()['games']['up']
+        for key in ('home_ats', 'away_ats', 'home_notes', 'away_notes'):
+            self.assertIn(key, game)
+        self.assertTrue(any('Last result' in n for n in game['away_notes']),
+                        'the FCS visitor keeps its own recent result')
+
+
 class BuildTests(unittest.TestCase):
     def test_ratings_and_projection_for_a_scheduled_game(self):
         events = [

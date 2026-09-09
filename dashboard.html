@@ -133,6 +133,10 @@ function modelDetail(e,p){
   const effect=p.spend_margin_shift?toward(p.spend_margin_shift):'no adjustment left — both teams have enough games this season';
   rows.push(`<div>Spending prior: <b>${effect}</b><small>${esc(label)}: ${esc(e.home)} ${money(p.home_spending?.[field])} · ${esc(e.away)} ${money(p.away_spending?.[field])}</small></div>`);
  }
+ if(p.pooled_fcs?.length){
+  const who=p.pooled_fcs.map(s=>esc(e[s])).join(' and ');
+  rows.push(`<div>FCS opponent: <b>${who}</b><small>Rated as a pooled FCS baseline, not individually. One or two games against FBS teams cannot rate a school on its own.</small></div>`);
+ }
  if(p.weather_note)rows.push(`<div class="model-weather">${esc(p.weather_note)}</div>`);
  if(p.confidence_detail)rows.push(`<div><small>${esc(p.confidence_detail)}</small></div>`);
  return rows.length?`<details class="model-detail"><summary>Model detail</summary>${rows.join('')}</details>`:'';
