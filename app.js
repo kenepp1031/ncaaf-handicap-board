@@ -1,4 +1,24 @@
-const token = window.CFB_TOKEN;let state={data:{events:[]},picks:[]},selected=null,activeTab=null,view='week',betsOnly=false,week=startWeek(new Date());const form=document.getElementById('pickform');const field=n=>form.elements.namedItem(n);const $=id=>document.getElementById(id);const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));const signed=n=>n==null?'—':(n>=0?'+':'')+Number(n);function iso(d){return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}function startWeek(d){let x=new Date(d.getFullYear(),d.getMonth(),d.getDate(),12);x.setDate(x.getDate()-(x.getDay()+6)%7);return x}function end(){if(activeTab)return iso(new Date(activeTab.end));let d=new Date(week);d.setDate(d.getDate()+6);return iso(d)}function inWeek(r){let e=r.event_id?(state.data.events||[]).find(e=>e.id===r.event_id):r;if(activeTab&&e&&e.week!=null)return e.season===state.data.season&&e.week===activeTab.number&&(e.season_type||2)===activeTab.type;return r.game_date>=iso(week)&&r.game_date<=end()}function notice(s){$('notice').textContent=s;$('notice').style.display='block'}async function api(path,body){let r=await fetch('/api/'+path,{method:body?'POST':'GET',headers:{'X-Tracker-Token':token,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});let d=await r.json();if(!r.ok)throw Error(d.error||r.statusText);return d}
+const token = window.CFB_TOKEN;let state={data:{events:[]},picks:[]},selected=null,activeTab=null,view='week',betsOnly=false,week=startWeek(new Date());const form=document.getElementById('pickform');const field=n=>form.elements.namedItem(n);const $=id=>document.getElementById(id);const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));const signed=n=>n==null?'—':(n>=0?'+':'')+Number(n);function iso(d){return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}function startWeek(d){let x=new Date(d.getFullYear(),d.getMonth(),d.getDate(),12);x.setDate(x.getDate()-(x.getDay()+6)%7);return x}function end(){if(activeTab)return iso(new Date(activeTab.end));let d=new Date(week);d.setDate(d.getDate()+6);return iso(d)}function inWeek(r){let e=r.event_id?(state.data.events||[]).find(e=>e.id===r.event_id):r;if(activeTab&&e&&e.week!=null)return e.season===state.data.season&&e.week===activeTab.number&&(e.season_type||2)===activeTab.type;return r.game_date>=iso(week)&&r.game_date<=end()}function notice(s){$('notice').textContent=s;$('notice').style.display='block'}
+// The token is minted per server process, so after a restart an open tab gets
+// 403 on everything. If the server answers a token-free ping, reload once to
+// pick up the new token. The ping and the 30-second guard stop a genuine auth
+// failure from turning into a reload loop.
+let recovering=false;
+async function recoverToken(){
+ if(recovering)return true;
+ try{
+  const ping=await fetch('/api/ping',{cache:'no-store'});
+  if(!ping.ok)return false;
+  let last=0;try{last=Number(sessionStorage.getItem('cfb-reloaded'))||0}catch(e){}
+  if(Date.now()-last<30000)return false;
+  try{sessionStorage.setItem('cfb-reloaded',String(Date.now()))}catch(e){}
+  recovering=true;
+  notice('The tracker restarted. Reloading…');
+  location.reload();
+  return true;
+ }catch(e){return false}
+}
+async function api(path,body){let r=await fetch('/api/'+path,{method:body?'POST':'GET',headers:{'X-Tracker-Token':token,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});if(r.status===403&&await recoverToken())return new Promise(()=>{});let d=await r.json();if(!r.ok)throw Error(d.error||r.statusText);return d}
 // Ask only for season data we do not already hold. Two integer comparisons
 // replace serialising 2.3MB twice per tick just to spot a change.
 async function load(){
@@ -12,8 +32,18 @@ async function load(){
 }
 async function refresh(full){try{await api('refresh',{full,week:iso(week),week_end:end()});await load()}catch(e){notice(e.message)}}function currentTab(){let weeks=state.data.weeks||[],now=new Date();return weeks.find(w=>new Date(w.start)<=now&&now<=new Date(w.end))||weeks.find(w=>new Date(w.start)>now)||weeks.at(-1)}
 function setTab(w){activeTab=w||null;if(w)week=new Date(w.start);else week=startWeek(new Date())}
-function switchWeek(id){setTab(state.data.weeks.find(w=>w.id===id));clearForm();render();refresh(false)}
-function currentWeek(){setTab(currentTab());clearForm();render();refresh(false);$('weektabs').querySelector('[aria-selected="true"]')?.scrollIntoView({block:'nearest',inline:'center'})}
+// Every week's games are already on the page, so switching renders at once.
+// A week still gets one background top-up for fresh odds and weather, but the
+// click never waits on it: that sync can mean twenty DraftKings pages.
+const toppedUp=new Set();
+function topUp(){
+ const key=activeTab?activeTab.id:iso(week);
+ if(toppedUp.has(key))return;
+ toppedUp.add(key);
+ api('refresh',{full:false,week:iso(week),week_end:end()}).catch(()=>{});
+}
+function switchWeek(id){setTab(state.data.weeks.find(w=>w.id===id));clearForm();render();topUp()}
+function currentWeek(){setTab(currentTab());clearForm();render();topUp();$('weektabs').querySelector('[aria-selected="true"]')?.scrollIntoView({block:'nearest',inline:'center'})}
 function applyTheme(t){document.documentElement.dataset.theme=t;$('themeToggle').textContent=t==='light'?'🌙 Dark mode':'☀️ Light mode';try{localStorage.setItem('cfb-theme',t)}catch(e){}}
 function toggleTheme(){applyTheme(document.documentElement.dataset.theme==='light'?'dark':'light')}
 function setView(v){view=v;['week','power','print'].forEach(x=>$('view-'+x).hidden=(x!==v));document.querySelectorAll('.viewtabs [data-view]').forEach(b=>b.setAttribute('aria-selected',b.dataset.view===v))}
@@ -26,7 +56,7 @@ function weatherText(e){let w=e.weather;if(e.venue?.indoor)return '<span class="
 
 function teamTitle(e,side){let rank=e[side+'_combined'];return `<div class="team-title">${e[side+'_logo']?`<img src="${esc(e[side+'_logo'])}" alt="" loading="lazy">`:''}<div><div class="team-sub">${side==='home'?(e.neutral?'DESIGNATED HOME · NEUTRAL SITE':'HOME'):'AWAY'}${e[side+'_record']?' · '+esc(e[side+'_record']):''}</div><h3>${rank?`<span class="rank" title="Combined CBS / AP / Coaches poll">Poll #${rank}</span> `:''}${esc(e[side])}</h3></div></div>`}
 function powerGame(e){return (state.data.power&&state.data.power.games)?state.data.power.games[e.id]:null}
-function atsText(a){if(a&&a.wins+a.losses+a.pushes===0)return 'ATS history unavailable';return a?`${a.wins}-${a.losses}-${a.pushes} ATS`:''}
+function atsText(a){if(a&&a.wins+a.losses+a.pushes===0){const since=state.data.lines_captured_since;return since?`ATS: capturing lines since ${new Date(since).toLocaleDateString()}`:'ATS history unavailable'}return a?`${a.wins}-${a.losses}-${a.pushes} ATS`:''}
 function previousGameBlock(e,side){
  const tid=e[side+'_id'],asOf=state.data.power?.as_of||state.today;
  const prior=(state.data.events||[]).filter(g=>g.completed&&g.home_score!=null&&g.away_score!=null&&g.game_date<e.game_date&&(!asOf||g.game_date<asOf)&&(g.home_id===tid||g.away_id===tid)).sort((a,b)=>b.game_date.localeCompare(a.game_date))[0];

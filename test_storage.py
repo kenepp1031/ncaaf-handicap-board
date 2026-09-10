@@ -50,5 +50,44 @@ class TrackerTests(unittest.TestCase):
         s.db.close()
 
 
+def upcoming(id='e1', spread=-7.0, kickoff='2026-09-12T16:00+00:00', **extra):
+    return dict(id=id, completed=False, home_spread=spread, total=50.5, home_odds=-110, away_odds=-110,
+                kickoff=kickoff, market_source='ESPN', **extra)
+
+
+class MarketLineTests(unittest.TestCase):
+    def setUp(self):
+        self.store = Store(':memory:')
+
+    def tearDown(self):
+        self.store.db.close()
+
+    def test_an_unchanged_line_is_not_captured_twice(self):
+        self.assertEqual(self.store.capture_lines([upcoming()], '2026-09-10T10:00:00-04:00'), 1)
+        self.assertEqual(self.store.capture_lines([upcoming()], '2026-09-10T10:15:00-04:00'), 0)
+
+    def test_a_moved_line_is_captured_and_becomes_the_closing_line(self):
+        self.store.capture_lines([upcoming(spread=-7.0)], '2026-09-10T10:00:00-04:00')
+        self.store.capture_lines([upcoming(spread=-8.5)], '2026-09-11T10:00:00-04:00')
+        self.assertEqual(self.store.closing_lines()['e1']['home_spread'], -8.5)
+
+    def test_a_capture_after_kickoff_is_not_the_closing_line(self):
+        # 13:00 in New York is 17:00 UTC, an hour after a 16:00 UTC kickoff.
+        # Comparing the strings would wrongly treat it as before kickoff.
+        self.store.capture_lines([upcoming(spread=-7.0)], '2026-09-12T11:00:00-04:00')
+        self.store.capture_lines([upcoming(spread=-3.0)], '2026-09-12T13:00:00-04:00')
+        self.assertEqual(self.store.closing_lines()['e1']['home_spread'], -7.0)
+
+    def test_completed_or_lineless_games_are_skipped(self):
+        games = [upcoming('a'), dict(upcoming('b'), completed=True), upcoming('c', spread=None)]
+        self.assertEqual(self.store.capture_lines(games, '2026-09-10T10:00:00-04:00'), 1)
+        self.assertEqual(set(self.store.closing_lines()), {'a'})
+
+    def test_capture_start_is_reported(self):
+        self.assertIsNone(self.store.capture_started())
+        self.store.capture_lines([upcoming()], '2026-09-10T10:00:00-04:00')
+        self.assertEqual(self.store.capture_started(), '2026-09-10T10:00:00-04:00')
+
+
 if __name__ == '__main__':
     unittest.main()

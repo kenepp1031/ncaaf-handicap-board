@@ -95,6 +95,61 @@ class DashboardTests(unittest.TestCase):
                 dashboard.DATA, dashboard.STATE = old_data, old_state
 
 
+class ClosingLineTests(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.old_data = dashboard.DATA
+        dashboard.DATA = Path(self.folder.name)
+
+    def tearDown(self):
+        dashboard.DATA = self.old_data
+        self.folder.cleanup()
+
+    def test_a_completed_game_gets_back_the_line_captured_before_kickoff(self):
+        store = Store(dashboard.DATA/'picks.sqlite3')
+        store.capture_lines([dict(id='g1', completed=False, home_spread=-6.5, total=48.0, home_odds=-110,
+                                  away_odds=-110, kickoff='2026-09-06T20:00:00+00:00', market_source='ESPN')],
+                            '2026-09-05T12:00:00-04:00')
+        store.db.close()
+        payload = {'events': [dict(id='g1', completed=True, home_spread=None, home_score=24, away_score=17),
+                              dict(id='g2', completed=True, home_spread=None, home_score=10, away_score=3)]}
+        dashboard.record_lines(payload, capture=False)
+        self.assertEqual(payload['events'][0]['home_spread'], -6.5)
+        self.assertIsNone(payload['events'][1]['home_spread'], 'no capture, no invented line')
+        self.assertEqual(payload['lines_captured_since'], '2026-09-05T12:00:00-04:00')
+
+    def test_a_line_the_feed_still_carries_is_left_alone(self):
+        payload = {'events': [dict(id='g1', completed=True, home_spread=-3.0)]}
+        dashboard.record_lines(payload)
+        self.assertEqual(payload['events'][0]['home_spread'], -3.0)
+
+
+class WarmUpTests(unittest.TestCase):
+    def test_saving_an_event_pick_before_the_season_loads_says_so(self):
+        with tempfile.TemporaryDirectory() as folder:
+            old_data, old_state = dashboard.DATA, dashboard.STATE
+            dashboard.DATA = Path(folder)
+            dashboard.STATE = {'data': {}, 'error': '', 'refreshing': True, 'data_revision': 0, 'picks_revision': 0}
+            server = dashboard.ThreadingHTTPServer(('127.0.0.1', 0), dashboard.Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                pick = dict(game_date='2026-09-12', home='A', away='B', side='Home', spread=-3, odds=-110,
+                            stake=1, home_score='', away_score='', notes='', event_id='401')
+                request = urllib.request.Request(f'http://127.0.0.1:{server.server_port}/api/save',
+                                                 data=json.dumps(pick).encode(),
+                                                 headers={'X-Tracker-Token': dashboard.TOKEN,
+                                                          'Content-Type': 'application/json'})
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    urllib.request.urlopen(request)
+                self.assertIn('Still loading', json.loads(caught.exception.read())['error'])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+                dashboard.DATA, dashboard.STATE = old_data, old_state
+
+
 class RevisionGatingTests(unittest.TestCase):
     """The season payload should move only when it actually changes."""
 

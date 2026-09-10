@@ -2,6 +2,8 @@
 
 Run `Start Weekly Picks.cmd` or the NCAAF desktop shortcut. The local browser app uses port 8768. Reopening it reuses the running server, whichever port that server is on: each one registers itself in `data/servers.json`, so a launch finds it instead of starting a second copy. Use `Stop Weekly Picks.cmd` (or `python dashboard.py --stop`) before restarting after Python source changes; it closes every tracker instance and leaves ports belonging to other programs alone.
 
+The page opens as soon as the server binds, then shows "Refreshing…" while the cached season and fresh feeds load. It polls every five seconds but receives the season data only when it has changed — an idle poll is about 6 KB — and redraws only when something actually moved, so open panels stay open. Switching weeks renders instantly from data already on the page; each week gets one background top-up for odds and weather, and the Refresh button forces a pull. If the server restarts while the page is open, the page reloads itself once to pick up the new session.
+
 ## Weekly picks
 
 This Week combines the weekly matchup layout and one-click Board controls. Select a side to save its available spread and price, use the star to mark an actual wager, and Edit for stakes, notes, corrections or manually supplied odds. Clicking the already saved side does not overwrite its original line. Missing prices require manual entry. Market refreshes preserve saved picks, and completed scores settle them automatically.
@@ -36,7 +38,9 @@ Print shows offense/defense ranks and letters beside the teams, with spread, tot
 
 Power Ranking also carries a Data health panel: feed counts, poll dates, the fitted spending slope, and which of this week's games have no market spread.
 
-`data/picks.sqlite3` stores picks and captured market snapshots. `data/live.json` stores feeds. `nil.json` caches school spending and `servers.json` tracks running instances. `history-YYYY.json` caches prior-season scores, `locations.json` caches city coordinates, and `rank_history.json` preserves observed poll snapshots. Missing provider odds remain missing; no betting lines are invented. ATS history needs historical closing spreads and may be unavailable even when scores exist.
+`data/picks.sqlite3` stores picks and captured market snapshots. `data/live.json` stores feeds. `nil.json` caches school spending and `servers.json` tracks running instances. `history-YYYY.json` caches prior-season scores, `locations.json` caches city coordinates, and `rank_history.json` preserves observed poll snapshots. Missing provider odds remain missing; no betting lines are invented.
+
+ESPN removes the odds from a game once it kicks off, so the app archives lines itself: every sync records each upcoming game's spread, total and prices in the `market_lines` table whenever they change, and the last capture before kickoff becomes that game's closing line. Completed games get their closing line back in memory before the model runs, which is what lets ATS records and the letdown note work. Archiving began on 2026-09-10; nothing earlier can be recovered, so ATS records fill in only for games played after that. The cards say "capturing lines since …" until a team has one.
 
 `handicap.py` holds the rating model `power.py` fits, plus a command-line `ratings`/`predict`/`backtest` interface over CSV files. The dashboard uses only its `Model` class.
 

@@ -1,6 +1,11 @@
 import sqlite3
 import json
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def _instant(stamp):
+    """An ISO timestamp as an aware UTC datetime, whatever offset it was written with."""
+    return datetime.fromisoformat(stamp.replace('Z', '+00:00')).astimezone(timezone.utc)
 
 def settle(pick):
     if pick['home_score'] is None or pick['away_score'] is None:
@@ -33,7 +38,53 @@ class Store:
         if 'favorite' not in existing:
             self.db.execute('ALTER TABLE picks ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0')
         self.db.execute('CREATE TABLE IF NOT EXISTS pick_edits (id INTEGER PRIMARY KEY, pick_id INTEGER, prior_value TEXT, edited_at TEXT)')
+        # ESPN drops the odds object once a game kicks off, so a spread that is
+        # not captured beforehand is gone for good. One row per observed change.
+        self.db.execute('''CREATE TABLE IF NOT EXISTS market_lines (
+            event_id TEXT NOT NULL, captured_at TEXT NOT NULL, kickoff TEXT,
+            home_spread REAL, total REAL, home_odds REAL, away_odds REAL, source TEXT,
+            PRIMARY KEY (event_id, captured_at))''')
         self.db.commit()
+
+    def capture_lines(self, events, now=None):
+        """Record the current line for every upcoming game whose line moved.
+
+        Unchanged lines are skipped, so a 15-minute sync does not write a row
+        per game per sync. Returns how many captures were written.
+        """
+        now = now or datetime.now().astimezone().isoformat(timespec='seconds')
+        latest = {r['event_id']: (r['home_spread'], r['total'], r['home_odds'], r['away_odds'])
+                  for r in self.db.execute('''SELECT m.* FROM market_lines m JOIN
+                      (SELECT event_id, MAX(captured_at) AS at FROM market_lines GROUP BY event_id) l
+                      ON m.event_id = l.event_id AND m.captured_at = l.at''')}
+        rows = []
+        for e in events:
+            if e.get('completed') or e.get('home_spread') is None:
+                continue
+            line = (e['home_spread'], e.get('total'), e.get('home_odds'), e.get('away_odds'))
+            if latest.get(e['id']) == line:
+                continue
+            rows.append((e['id'], now, e.get('kickoff'), *line, e.get('market_source')))
+        with self.db:
+            self.db.executemany('INSERT OR IGNORE INTO market_lines VALUES (?,?,?,?,?,?,?,?)', rows)
+        return len(rows)
+
+    def closing_lines(self):
+        """The last capture before kickoff for each game: {event_id: row}."""
+        closing = {}
+        for r in self.db.execute('SELECT * FROM market_lines ORDER BY captured_at'):
+            # Compare as instants: captures carry the local offset and kickoffs
+            # ESPN's UTC, so comparing the strings would be wrong by hours.
+            if r['kickoff'] and _instant(r['captured_at']) >= _instant(r['kickoff']):
+                continue
+            prior = closing.get(r['event_id'])
+            if prior is None or _instant(r['captured_at']) > _instant(prior['captured_at']):
+                closing[r['event_id']] = dict(r)
+        return closing
+
+    def capture_started(self):
+        row = self.db.execute('SELECT MIN(captured_at) FROM market_lines').fetchone()
+        return row[0] if row else None
 
     def save(self, values, pick_id=None):
         now = datetime.now().astimezone().isoformat(timespec='seconds')

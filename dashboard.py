@@ -99,9 +99,38 @@ def snapshot_and_trend(payload, today):
     return trend, len(history)
 
 
+def record_lines(payload, capture=True):
+    """Archive today's lines and give completed games back their closing line.
+
+    ESPN strips the odds object at kickoff, so without this every completed
+    game arrives spreadless: ATS records read zero forever and the letdown
+    note, which needs last week's spread, never fires. The merge is in memory
+    only; the database is the record.
+    """
+    with LOCK:
+        s = Store(DATA/'picks.sqlite3')
+        try:
+            if capture:
+                s.capture_lines(payload.get('events', []))
+            closing, since = s.closing_lines(), s.capture_started()
+        finally:
+            s.db.close()
+    for e in payload.get('events', []):
+        line = closing.get(e['id'])
+        if e.get('completed') and e.get('home_spread') is None and line and line['home_spread'] is not None:
+            e['home_spread'] = line['home_spread']
+            e['closing_line_captured_at'] = line['captured_at']
+    payload['lines_captured_since'] = since
+    return payload
+
+
 def add_power(payload):
     if not payload.get('events'):
         return payload
+    try:
+        record_lines(payload)
+    except Exception as e:
+        payload.setdefault('warnings', []).append('Closing-line archive failed: '+str(e))
     spend = {}
     try:
         spend = nil.refresh(DATA)
@@ -120,6 +149,34 @@ def add_power(payload):
         payload['poll_trend'], payload['poll_history_weeks'] = {}, 0
         payload.setdefault('warnings', []).append('Poll history tracking failed: '+str(e))
     return payload
+
+
+def warm_up():
+    """Load the cached season, then pull fresh feeds -- after the socket is up.
+
+    This used to run before the server bound its port, so the page could not
+    open until a 2.5MB parse and a full model build had finished, and then
+    sync(True) redid all of it. Now the page opens immediately and shows
+    "Refreshing…" until the cached season lands.
+    """
+    global PENDING_SYNC
+    with LOCK:
+        STATE['refreshing'] = True
+    try:
+        cached = read_cache()
+        if cached:
+            data = add_power(cached)
+            with LOCK:
+                publish(data)
+    except Exception as e:
+        with LOCK:
+            STATE['error'] = 'Cached season failed to load: '+str(e)
+    finally:
+        with LOCK:
+            STATE['refreshing'] = False
+            # A refresh asked for meanwhile is covered by the full one below.
+            PENDING_SYNC = None
+    sync(True)
 
 
 def sync(full=False, week=None, week_end=None):
@@ -319,6 +376,8 @@ class Handler(BaseHTTPRequestHandler):
                     prior = next((r for r in rows if r['id'] == pick_id), None)
                     if pick_id and not prior:
                         raise ValueError('Saved pick not found')
+                    if body.get('event_id') and not STATE['data'].get('events'):
+                        raise ValueError('Still loading the season. Try again in a moment.')
                     v = validate_pick(body, prior, STATE['data'].get('events',[]))
                     if not prior and any((v['event_id'] and r['event_id'] == v['event_id']) or (r['game_date'] == v['game_date'] and r['home'].casefold() == v['home'].casefold() and r['away'].casefold() == v['away'].casefold()) for r in rows):
                         raise ValueError('You already saved this matchup. Use Edit beside your pick.')
@@ -349,7 +408,6 @@ def main():
             webbrowser.open(f'http://127.0.0.1:{running}')
         print(f'The tracker is already running: http://127.0.0.1:{running}', flush=True)
         return
-    publish(add_power(read_cache()))
     try:
         server = LocalServer(('127.0.0.1', a.port), Handler)
     except OSError:
@@ -360,7 +418,7 @@ def main():
     url = f'http://127.0.0.1:{server.server_port}'
     print('College football tracker:',url,flush=True)
     servers.register(DATA, server.server_port, TOKEN)
-    sync(True)
+    threading.Thread(target=warm_up, daemon=True).start()
     if not a.no_browser:
         webbrowser.open(url)
     try:

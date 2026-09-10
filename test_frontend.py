@@ -62,5 +62,28 @@ class PageWiringTests(unittest.TestCase):
                          'app.js looks up element ids that the markup does not define')
 
 
+class BehaviourContractTests(unittest.TestCase):
+    def body(self, name):
+        match = re.search(r'function %s\([^)]*\)\{(.*?)\}\n' % name, APP_JS, re.S)
+        self.assertIsNotNone(match, f'{name} not found')
+        return match.group(1)
+
+    def test_switching_weeks_never_waits_on_a_network_sync(self):
+        # Each click used to await a full refresh: CBS, ESPN, up to twenty
+        # DraftKings pages. The week's games are already on the page.
+        for name in ('switchWeek', 'currentWeek'):
+            self.assertNotIn('refresh(', self.body(name))
+            self.assertIn('topUp()', self.body(name))
+
+    def test_a_403_goes_through_ping_gated_recovery(self):
+        self.assertIn('recoverToken()', APP_JS)
+        self.assertIn("fetch('/api/ping'", APP_JS)
+        self.assertIn('sessionStorage', APP_JS, 'the reload must be rate-limited so it cannot loop')
+
+    def test_the_poll_asks_only_for_data_it_lacks(self):
+        self.assertIn("api('state?since='", APP_JS)
+        self.assertNotIn('JSON.stringify(next)', APP_JS)
+
+
 if __name__ == '__main__':
     unittest.main()

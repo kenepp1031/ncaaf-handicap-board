@@ -339,6 +339,15 @@ def build(payload, as_of, spend=None):
     ap_ranks = payload.get('ap', {})
     names = team_names(events)
     fbs_names = {fbs_key(n) for n in payload.get('cbs', {})}
+    # Each team's own games, indexed once. ats_record, _neighbors and the
+    # recent-result lookup used to scan every event in the season per call --
+    # about 1.6 million iterations a build, growing every week. They filter by
+    # team themselves, so handing them the team's slice changes no result.
+    by_team = {}
+    for x in events:
+        for tid in (x['home_id'], x['away_id']):
+            by_team.setdefault(tid, []).append(x)
+    team_games = lambda tid: by_team.get(tid, [])
     completed_rows = _completed_before(payload.get('history_events', []) + events, as_of)
     model = Model(pooled_rows(completed_rows, names, fbs_names), as_of) if completed_rows else None
     ratings = {r['team']: r for r in model.ratings()} if model else {}
@@ -355,7 +364,7 @@ def build(payload, as_of, spend=None):
                              'rating': r['rating'] if r else None, 'offense': r['offense'] if r else None,
                              'defense': r['defense'] if r else None, 'games': r['games'] if r else 0,
                              'spending': nil.spending(spend, names.get(tid, '')) if spend else None,
-                             'ats': ats_record(events, tid, as_of)})
+                             'ats': ats_record(team_games(tid), tid, as_of)})
     peer_ids = {tid for tid in ratings if fbs_key(names.get(tid,'')) in fbs_names} if fbs_names else set(ratings)
     peers = [ratings[tid] for tid in peer_ids]
     offense_pool = [r['offense'] for r in peers]
@@ -395,19 +404,19 @@ def build(payload, as_of, spend=None):
         if e.get('completed') or date.fromisoformat(e['game_date']) < as_of:
             continue
         hid, aid = e['home_id'], e['away_id']
-        away_notes = situational_notes(events, aid, e.get('home_combined'), e['game_date'], combined)
+        away_notes = situational_notes(team_games(aid), aid, e.get('home_combined'), e['game_date'], combined)
         hostile = hostile_environment_note(e['home'], e.get('neutral'))
         if hostile:
             away_notes.append(hostile)
-        entry = {'home_ats': ats_record(events, hid, as_of), 'away_ats': ats_record(events, aid, as_of),
-                  'home_notes': situational_notes(events, hid, e.get('away_combined'), e['game_date'], combined),
+        entry = {'home_ats': ats_record(team_games(hid), hid, as_of), 'away_ats': ats_record(team_games(aid), aid, as_of),
+                  'home_notes': situational_notes(team_games(hid), hid, e.get('away_combined'), e['game_date'], combined),
                   'away_notes': away_notes}
         rivalry = {frozenset(('kansas','missouri')):'Border Showdown rivalry', frozenset(('iowa','iowastate')):'Cy-Hawk rivalry'}.get(frozenset((normal(e['home']),normal(e['away']))))
         if rivalry:
             entry['home_notes'].append(rivalry)
             entry['away_notes'].append(rivalry)
         for side, tid in (('home',hid),('away',aid)):
-            recent = [x for x in events if x.get('completed') and tid in (x['home_id'],x['away_id']) and x['game_date'] < min(e['game_date'], as_of.isoformat())]
+            recent = [x for x in team_games(tid) if x.get('completed') and tid in (x['home_id'],x['away_id']) and x['game_date'] < min(e['game_date'], as_of.isoformat())]
             if recent:
                 recent.sort(key=lambda x:x['game_date'])
                 last = recent[-1]

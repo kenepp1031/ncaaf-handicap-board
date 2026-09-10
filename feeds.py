@@ -2,6 +2,7 @@
 import json
 import re
 import html
+import time
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -11,6 +12,8 @@ from urllib.parse import urlencode
 ESPN = 'https://site.api.espn.com/apis/site/v2/sports/football/college-football/'
 CBS = 'https://www.cbssports.com/college-football/rankings/cbs-sports-rankings/'
 DK = 'https://dknetwork.draftkings.com/draftkings-sportsbook-betting-splits/?tb_eg=NCAA+Football&tb_edate=n30days&tb_emt=0&itm_content=NCAA+Football'
+# Overall time allowed for DraftKings pages 2..20 in one refresh.
+DK_BUDGET_SECONDS = 40
 
 
 def fetch(url):
@@ -174,11 +177,16 @@ def add_weather(events, folder, start, end):
             pass
         return key,None
     missing = [(k,a) for k,a in targets.items() if k not in locations]
+    added = False
     with ThreadPoolExecutor(max_workers=4) as pool:
         for k,v in pool.map(locate,missing):
             if v:
                 locations[k] = v
-    path.write_text(json.dumps(locations,indent=2),encoding='utf-8')
+                added = True
+    # After the first week nearly every city is known; don't rewrite ~100KB
+    # on every refresh when nothing was added.
+    if added or not path.exists():
+        path.write_text(json.dumps(locations,indent=2),encoding='utf-8')
     keys = [k for k in targets if k in locations]
     weather = {}
     # Batch nearby-city conditions; this is not a stadium weather-station reading.
@@ -228,22 +236,33 @@ def refresh(folder, week_start, full_season=False, week_end=None):
     else:
         start, end = week_start.strftime('%Y%m%d'), (week_end or week_start+timedelta(days=6)).strftime('%Y%m%d')
     url = ESPN+f'scoreboard?limit=1000&groups=80&dates={start}-{end}'
-    data = json.loads(fetch(url))
+    # The four top-level feeds are independent, so fetch them concurrently
+    # rather than paying up to four 25-second timeouts back to back. Each
+    # result is claimed where it was fetched before, so a failure still lands
+    # in the same try/except and produces the same warning as it always did.
+    pool = ThreadPoolExecutor(max_workers=4)
+    pending = {name: pool.submit(fetch, target) for name, target in
+               (('scoreboard', url), ('cbs', CBS), ('rankings', ESPN+'rankings'), ('dk', DK))}
+    pool.shutdown(wait=False)
+    got = lambda name: pending[name].result()
+    data = json.loads(got('scoreboard'))
     imported = parse_events(data)
     if not imported:
         raise ValueError('ESPN returned no games; existing saved data was retained')
+    if len(data.get('events', [])) >= 1000:
+        warnings.append('ESPN returned its 1,000-game limit; some games may be missing from this refresh.')
     for r in imported:
         events[r['id']] = r
     cbs = previous.get('cbs', {})
     try:
-        cbs = parse_cbs(fetch(CBS))
+        cbs = parse_cbs(got('cbs'))
     except Exception as e:
         warnings.append('CBS refresh failed; retained prior ranking snapshot: '+str(e))
     ap = previous.get('ap', {})
     ap_date = previous.get('ap_date', '')
     coaches = previous.get('coaches', {})
     try:
-        rankings = json.loads(fetch(ESPN+'rankings'))
+        rankings = json.loads(got('rankings'))
         poll = next(r for r in rankings['rankings'] if r.get('type') == 'ap')
         ap = {str(r['team']['id']): r['current'] for r in poll['ranks']}
         ap_date = poll.get('date', '')
@@ -254,10 +273,17 @@ def refresh(folder, week_start, full_season=False, week_end=None):
         warnings.append('AP via ESPN refresh failed; retained prior snapshot: '+str(e))
     split_rows = []
     try:
-        first = fetch(DK)
+        first = got('dk')
         split_rows.extend(parse_dk(first))
         pages = [int(x) for x in re.findall(r'tb_page=(\d+)', first)]
-        for page in range(2, min(max(pages, default=1), 20)+1):
+        # Up to twenty pages at a 25-second timeout each could stall a refresh
+        # for minutes. Take what arrives inside the budget and say so.
+        deadline = time.monotonic()+DK_BUDGET_SECONDS
+        last = min(max(pages, default=1), 20)
+        for page in range(2, last+1):
+            if time.monotonic() > deadline:
+                warnings.append(f'DraftKings splits stopped at page {page-1} of {last} to keep the refresh quick.')
+                break
             split_rows.extend(parse_dk(fetch(DK+f'&tb_page={page}')))
         if not split_rows:
             warnings.append('DraftKings supplied no readable spread splits; sportsbook lines from ESPN remain available.')
@@ -322,7 +348,8 @@ def refresh(folder, week_start, full_season=False, week_end=None):
               'events': sorted(events.values(), key=lambda r: r['kickoff']), 'warnings': warnings,
               'imported_count': len(imported), 'splits_count': len(split_rows)}
     temp = cache.with_suffix('.tmp')
-    temp.write_text(json.dumps(result, indent=2), encoding='utf-8')
+    # Compact: indent=2 inflated this 1.8MB cache to 2.5MB on every refresh.
+    temp.write_text(json.dumps(result, separators=(',', ':')), encoding='utf-8')
     temp.replace(cache)
     return result
 
