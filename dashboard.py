@@ -39,6 +39,24 @@ def touch_picks():
     STATE['picks_revision'] += 1
 
 
+# Keys the server needs and the page never reads. power.build takes cbs for the
+# FBS pool (and so for FCS pooling), ap for the poll blend, and history_events
+# for the fit; feeds keeps coaches as the fallback snapshot when the rankings
+# call fails. history_events alone is ~766KB. Strip them here, at the
+# serialization boundary, and never from STATE['data'] itself -- dropping any
+# of them there degrades the model silently, with no error.
+WIRE_OMIT = ('history_events', 'cbs', 'ap', 'coaches')
+
+
+def wire_data(data):
+    """The published season data as the page needs to see it."""
+    if not data:
+        return data
+    wire = {key: value for key, value in data.items() if key not in WIRE_OMIT}
+    wire['history_events_count'] = len(data.get('history_events') or ())
+    return wire
+
+
 def read_cache():
     cache = DATA/'live.json'
     return json.loads(cache.read_text(encoding='utf-8')) if cache.exists() else {}
@@ -249,11 +267,12 @@ class Handler(BaseHTTPRequestHandler):
                 # minutes at most, so send it only when the caller's copy is
                 # stale. Taking a reference here is safe because publish()
                 # replaces STATE['data'] wholesale and never mutates it.
-                if since != str(STATE['data_revision']):
-                    body['data'] = STATE['data']
+                published = STATE['data'] if since != str(STATE['data_revision']) else None
             # Deliberately outside the lock: settle() is pure, and serializing
             # megabytes while holding it stalls the refresh worker behind every
             # poll. SQLite access stays inside — the worker writes that file.
+            if published is not None:
+                body['data'] = wire_data(published)
             for r in rows:
                 r['result'], r['profit_units'] = settle(r)
             all_summary = summary(rows)

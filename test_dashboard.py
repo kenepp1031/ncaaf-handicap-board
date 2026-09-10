@@ -98,7 +98,11 @@ class DashboardTests(unittest.TestCase):
 class RevisionGatingTests(unittest.TestCase):
     """The season payload should move only when it actually changes."""
 
-    BULK = {'events': [], 'season': 2026, 'top50': [{'id': 'A', 'rank': 1}]*50,
+    # events survives the strip and is the bulk of a real payload; the four
+    # server-only keys do not.
+    BULK = {'events': [{'id': str(i), 'filler': 'x'*200} for i in range(200)],
+            'season': 2026, 'top50': [{'id': 'A', 'rank': 1}]*50,
+            'cbs': {'alabama': 1}, 'ap': {'A': 1}, 'coaches': {'A': 1},
             'history_events': [{'filler': 'x'*200} for _ in range(200)]}
 
     def setUp(self):
@@ -158,6 +162,25 @@ class RevisionGatingTests(unittest.TestCase):
         self.assertIn('data', after, 'a stale caller must be resent the new data')
         self.assertEqual(after['data']['season'], 2027)
         self.assertEqual(after['data_revision'], 5)
+
+    def test_server_only_keys_are_stripped_from_the_wire(self):
+        data = json.loads(self.call('state'))['data']
+        for key in dashboard.WIRE_OMIT:
+            self.assertNotIn(key, data)
+        self.assertEqual(data['history_events_count'], 200)
+        self.assertEqual(data['season'], 2026, 'the rest of the payload must survive')
+        self.assertEqual(len(data['top50']), 50)
+
+    def test_stripping_the_wire_never_touches_the_published_data(self):
+        # The real hazard: power.build reads cbs for the FBS pool, ap for the
+        # blend and history_events for the fit. Losing any of them from
+        # STATE['data'] would degrade the model with no error at all.
+        self.call('state')
+        self.call('state?since=0')
+        for key in dashboard.WIRE_OMIT:
+            if key in self.BULK:
+                self.assertIn(key, dashboard.STATE['data'], f'{key} must survive in STATE')
+        self.assertEqual(len(dashboard.STATE['data']['history_events']), 200)
 
     def test_the_market_snapshot_is_kept_in_the_database_but_not_shipped(self):
         pick = dict(game_date='2026-09-12', home='Test Home', away='Test Away', side='Away',
