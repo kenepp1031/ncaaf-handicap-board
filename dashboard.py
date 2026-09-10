@@ -9,6 +9,7 @@ import webbrowser
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs
 from storage import Store, settle, summary
 from feeds import refresh
 import nil
@@ -20,8 +21,22 @@ DATA = FOLDER/'data'
 DATA.mkdir(exist_ok=True)
 TOKEN = secrets.token_urlsafe(24)
 LOCK = threading.Lock()
-STATE = {'refreshing': False, 'error': '', 'data': {}}
+# Two counters let a poll answer "has anything changed?" with one integer
+# comparison instead of shipping the whole season every five seconds. Bump
+# them only while holding LOCK.
+STATE = {'refreshing': False, 'error': '', 'data': {}, 'data_revision': 0, 'picks_revision': 0}
 PENDING_SYNC = None
+
+
+def publish(data):
+    """Replace the published season data. LOCK must be held."""
+    STATE['data'] = data
+    STATE['data_revision'] += 1
+
+
+def touch_picks():
+    """Note that saved picks changed. LOCK must be held."""
+    STATE['picks_revision'] += 1
 
 
 def read_cache():
@@ -109,7 +124,9 @@ def sync(full=False, week=None, week_end=None):
                     s.apply_scores(payload['events'])
                 finally:
                     s.db.close()
-                STATE['data'] = payload
+                # Settled scores may have changed a pick's result.
+                touch_picks()
+                publish(payload)
         except Exception as e:
             with LOCK:
                 STATE['error'] = str(e)
@@ -217,16 +234,35 @@ class Handler(BaseHTTPRequestHandler):
             return self.send({'app': servers.APP, 'port': self.server.server_port, 'pid': os.getpid()})
         if self.headers.get('X-Tracker-Token') != TOKEN:
             return self.send({'error': 'Unauthorized'}, 403)
-        if self.path == '/api/state':
+        route, _, query = self.path.partition('?')
+        if route == '/api/state':
+            since = parse_qs(query).get('since', [''])[0]
             with LOCK:
                 s = Store(DATA/'picks.sqlite3')
                 try:
                     rows = s.all()
                 finally:
                     s.db.close()
-                for r in rows:
-                    r['result'], r['profit_units'] = settle(r)
-                self.send(dict(STATE, picks=rows, all_summary=summary(rows), today=date.today().isoformat()))
+                body = {'data_revision': STATE['data_revision'], 'picks_revision': STATE['picks_revision'],
+                        'refreshing': STATE['refreshing'], 'error': STATE['error']}
+                # The season data is the expensive part and changes every 15
+                # minutes at most, so send it only when the caller's copy is
+                # stale. Taking a reference here is safe because publish()
+                # replaces STATE['data'] wholesale and never mutates it.
+                if since != str(STATE['data_revision']):
+                    body['data'] = STATE['data']
+            # Deliberately outside the lock: settle() is pure, and serializing
+            # megabytes while holding it stalls the refresh worker behind every
+            # poll. SQLite access stays inside — the worker writes that file.
+            for r in rows:
+                r['result'], r['profit_units'] = settle(r)
+            all_summary = summary(rows)
+            # market_snapshot is the event as it looked when the pick was saved:
+            # ~1.8KB each, kept in SQLite as provenance and never read by the
+            # page. Dropping it from the wire alone is most of an idle poll.
+            wire = [{k: v for k, v in r.items() if k != 'market_snapshot'} for r in rows]
+            body.update(picks=wire, all_summary=all_summary, today=date.today().isoformat())
+            self.send(body)
         else:
             self.send({'error':'Not found'},404)
 
@@ -252,6 +288,7 @@ class Handler(BaseHTTPRequestHandler):
                         s.set_favorite(int(body['id']), bool(body.get('favorite')))
                     finally:
                         s.db.close()
+                    touch_picks()
                 return self.send({'ok':True})
             if self.path != '/api/save':
                 return self.send({'error':'Not found'},404)
@@ -269,6 +306,7 @@ class Handler(BaseHTTPRequestHandler):
                     s.save(v, pick_id)
                 finally:
                     s.db.close()
+                touch_picks()
             self.send({'ok':True})
         except (ValueError, TypeError, KeyError) as e:
             self.send({'error':str(e)},400)
@@ -292,7 +330,7 @@ def main():
             webbrowser.open(f'http://127.0.0.1:{running}')
         print(f'The tracker is already running: http://127.0.0.1:{running}', flush=True)
         return
-    STATE['data'] = add_power(read_cache())
+    publish(add_power(read_cache()))
     try:
         server = LocalServer(('127.0.0.1', a.port), Handler)
     except OSError:
