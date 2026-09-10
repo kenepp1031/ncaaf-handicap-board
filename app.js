@@ -178,6 +178,41 @@ function renderPrint(){
  let games=(state.data.events||[]).filter(inWeek).filter(e=>e.home_combined||e.away_combined);
  $('printboard').innerHTML=games.map(e=>matchupCard(e,true)).join('')||'<div class="empty">No Top 50 matchups this week.</div>';
 }
+// Update matchup cards in place, keyed by event id, instead of rebuilding the
+// list. Unchanged cards keep their DOM node, so an open Model-detail panel and
+// the list's scroll position survive a refresh or a saved pick. A card that
+// did change is replaced but keeps its panel open if it was. Cards stay direct
+// <article class="match"> children so the striping and print grid still match.
+const cardCache=new Map();
+function renderGames(games){
+ const box=$('games');
+ if(!games.length){
+  cardCache.clear();
+  box.innerHTML='<div class="empty">No Top 50 matchups in this week’s imported schedule.</div>';
+  return;
+ }
+ const old=new Map([...box.children].filter(n=>n.dataset.key).map(n=>[n.dataset.key,n]));
+ const scroll=box.scrollTop,frag=document.createDocumentFragment();
+ for(const e of games){
+  const html=matchupCard(e);
+  let node=old.get(e.id);
+  if(!node||cardCache.get(e.id)!==html){
+   const wasOpen=!!node?.querySelector('.model-detail')?.open;
+   const t=document.createElement('template');
+   t.innerHTML=html;
+   const fresh=t.content.firstElementChild;
+   fresh.dataset.key=e.id;
+   if(wasOpen){const d=fresh.querySelector('.model-detail');if(d)d.open=true}
+   node=fresh;
+   cardCache.set(e.id,html);
+  }
+  old.delete(e.id);
+  frag.appendChild(node);
+ }
+ for(const [key,node] of old){cardCache.delete(key);node.remove()}
+ box.replaceChildren(frag);
+ box.scrollTop=scroll;
+}
 function render(){
  let d=state.data||{},firstWeek=!activeTab;if(!activeTab&&(d.weeks||[]).length)setTab(currentTab());
  $('weektitle').textContent=(activeTab?activeTab.label+' · ':'')+(activeTab?.detail||(iso(week)+' — '+end()));$('matchtitle').textContent=(activeTab?activeTab.label:'This week')+' matchups';
@@ -186,7 +221,7 @@ function render(){
  $('source').textContent=(state.refreshing?'Refreshing… ':state.error?'Refresh failed; using saved data. '+state.error+' ':'')+`Season ${d.season||'—'} · ${(d.top50||[]).length} combined teams · Updated ${d.updated_at||'not yet'}`+(d.warnings?.length?' · '+d.warnings.join(' | '):'');
  $('roster').innerHTML=(d.top50||[]).map(t=>`<div><b class="rank">${t.rank}.</b> ${esc(t.team)}<br><small>CBS ${t.cbs||'—'} · AP ${t.ap||'—'} · Coaches ${t.coaches||'—'}</small></div>`).join('');
  let games=(d.events||[]).filter(inWeek).filter(e=>e.home_combined||e.away_combined);
- $('games').innerHTML=games.map(e=>matchupCard(e)).join('')||'<div class="empty">No Top 50 matchups in this week’s imported schedule.</div>';
+ renderGames(games);
  let allPicks=betsOnly?state.picks.filter(p=>p.favorite):state.picks;
  let picks=allPicks.filter(inWeek),w=picks.filter(p=>p.result==='Win').length,l=picks.filter(p=>p.result==='Loss').length,push=picks.filter(p=>p.result==='Push').length,pending=picks.filter(p=>p.result==='Pending').length,net=picks.reduce((s,p)=>s+p.profit_units,0);
  $('metrics').innerHTML=`<div class="metric"><strong>${w}–${l}–${push}</strong><small>Wins · losses · pushes</small></div><div class="metric"><strong>${pending}</strong><small>Pending picks</small></div><div class="metric"><strong>${w+l?(100*w/(w+l)).toFixed(1)+'%':'—'}</strong><small>ATS win rate (excludes pushes)</small></div><div class="metric"><strong>${net>=0?'+':''}${net.toFixed(2)}</strong><small>Net units</small></div>`;

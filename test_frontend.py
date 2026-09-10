@@ -80,6 +80,13 @@ class BehaviourContractTests(unittest.TestCase):
         self.assertIn("fetch('/api/ping'", APP_JS)
         self.assertIn('sessionStorage', APP_JS, 'the reload must be rate-limited so it cannot loop')
 
+    def test_matchup_cards_are_updated_in_place_not_rebuilt(self):
+        # Rebuilding #games with innerHTML closed every open panel and reset
+        # the list's scroll on each refresh or saved pick.
+        self.assertNotIn("$('games').innerHTML=games.map", APP_JS)
+        self.assertIn('renderGames(games)', APP_JS)
+        self.assertIn('dataset.key=e.id', APP_JS)
+
     def test_the_poll_asks_only_for_data_it_lacks(self):
         self.assertIn("api('state?since='", APP_JS)
         self.assertNotIn('JSON.stringify(next)', APP_JS)
