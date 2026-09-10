@@ -146,7 +146,7 @@ function renderHealth(){
   healthRow('Feed last refreshed',d.updated_at?new Date(d.updated_at).toLocaleString():null),
   healthRow('Games imported this refresh',d.imported_count),
   healthRow('Betting-splits rows read',d.splits_count,'DraftKings public bet and handle percentages — shown as context, never used by the model.'),
-  healthRow('Previous-season games cached',d.history_events_count,'Included in the fit with a 180-day recency half-life.'),
+  healthRow('Previous-season games cached',d.history_events_count,'Included in the fit with a 365-day recency half-life.'),
   healthRow('AP poll dated',d.ap_date?new Date(d.ap_date).toLocaleDateString():null),
   healthRow('Model fit as of',power.as_of,'Games on or after this date are excluded from the fit.'),
   healthRow('Ranking comparison pool',power.ranking_population==null?null:power.ranking_population+' '+(power.ranking_scope||'teams')),

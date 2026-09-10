@@ -5,6 +5,15 @@ from feeds import normal
 import nil
 
 MIN_GAMES = 2
+# Chosen by walk-forward test: every 2025 game predicted only from games before
+# it, scored against the actual final margin, then confirmed once on 2026's
+# games, which the choice never saw. Against the previous 8 / 180 days:
+#   2025 mean abs margin error  13.11 -> 12.30
+#   2026 holdout mean           18.67 -> 17.15, median 15.12 -> 14.94
+# Ridge 1.5 was an interior optimum (1.0 and 3.0 both worse); the half-life
+# was flat beyond 365 days. Early-season holdout error is high for any model.
+MODEL_RIDGE = 1.5
+MODEL_HALF_LIFE = 365.0
 BYE_REST_DAYS = 12
 WIND_LEAN_MPH = 15
 RAIN_LEAN_IN = 0.05
@@ -257,7 +266,7 @@ def rating_history(payload, today):
         rows = _completed_before(all_rows, start)
         if not rows:
             continue
-        m = Model(pooled_rows(rows, names, fbs_names), start)
+        m = Model(pooled_rows(rows, names, fbs_names), start, ridge=MODEL_RIDGE, half_life=MODEL_HALF_LIFE)
         eligible = [r for r in m.ratings() if r['team'] in combined_ranks and r['games'] >= MIN_GAMES]
         triples = [(r['team'], r['rating'], ap_ranks.get(r['team']) or combined_ranks.get(r['team'])) for r in eligible]
         blended = _blend_with_ap(triples)
@@ -349,7 +358,8 @@ def build(payload, as_of, spend=None):
             by_team.setdefault(tid, []).append(x)
     team_games = lambda tid: by_team.get(tid, [])
     completed_rows = _completed_before(payload.get('history_events', []) + events, as_of)
-    model = Model(pooled_rows(completed_rows, names, fbs_names), as_of) if completed_rows else None
+    model = (Model(pooled_rows(completed_rows, names, fbs_names), as_of, ridge=MODEL_RIDGE, half_life=MODEL_HALF_LIFE)
+             if completed_rows else None)
     ratings = {r['team']: r for r in model.ratings()} if model else {}
     spend_fits = nil.fit(spend, ratings, names) if spend else None
     season_games = {}
@@ -464,7 +474,7 @@ def build(payload, as_of, spend=None):
     fit_count = len(completed_rows)
     thin = sum(1 for r in top_ratings if r['games'] < MIN_GAMES)
     fcs = ratings.get(POOLED_FCS)
-    status = (f'Fit on {fit_count} completed FBS games. Offense and defense ranks/grades compare rated FBS teams only; FCS opponents are excluded from the ranking pool. Previous-season scores are included when available, with recency weighting (180-day half-life). '
+    status = (f'Fit on {fit_count} completed FBS games. Offense and defense ranks/grades compare rated FBS teams only; FCS opponents are excluded from the ranking pool. Previous-season scores are included when available, with recency weighting ({MODEL_HALF_LIFE:.0f}-day half-life). '
               'Predictions use opponent-adjusted scoring, home/neutral venue and rest/lookahead context. '
               'Early-season confidence is Low; no ATS lean without both team histories and a market spread. '
               'Confidence is qualitative and has not been calibrated as a cover probability.')

@@ -2,6 +2,26 @@
 
 Updated the existing app used by NCAAF.lnk, in `i-wa/outputs/cfb_handicap`.
 
+## September 10 — lighter, smoother, sharper
+
+The project is now a git repository; each change below is its own commit.
+
+**Model.** FCS opponents share one pooled rating: individually they appear once or twice a season and ridge shrinkage rated them far too generously (Miami −14 against Florida A&M where the market said −57.5). Model settings were then retuned by walk-forward testing — each 2025 game predicted only from earlier games and scored against its final margin, confirmed on 2026 games the choice never saw. Ridge 8 → 1.5 and half-life 180 → 365 days.
+
+| Check | Before | After |
+|---|---|---|
+| 2025 walk-forward mean margin error | 13.11 | 12.30 |
+| 2026 holdout mean / median | 18.67 / 15.12 | 17.15 / 14.94 |
+| Gap to this week's market lines, mean / median (154 games) | 12.11 / 7.35 originally | 4.96 / 3.57 |
+
+The market was never used for tuning, so agreeing with it more closely is independent evidence. The top ten power ranking barely moves. This is still a scoring model, not a proven betting edge.
+
+**Closing lines are now archived.** ESPN strips odds at kickoff, so 0 of 1,057 completed games had a spread and ATS records could never fill in. Each sync writes upcoming lines to `market_lines` when they move; the last capture before kickoff is the closing line. Archiving began 2026-09-10 — nothing earlier is recoverable.
+
+**Performance.** The page polled 2.54 MB every five seconds; it now gets the season only when it changed (idle poll ~6 KB, 473× less), stops shipping four keys it never read, serializes outside the lock, and redraws only on real change. Cards update in place, so open panels and scroll survive. Week switching is instant (48 ms) instead of awaiting a full feed sync. The page serves in ~2 s instead of after the model build. Refreshes fetch feeds concurrently and cap DraftKings paging at 40 s. `power.build` is 2.7× faster with byte-identical output. A tab left open across a server restart now reloads itself.
+
+**Front end** split into `dashboard.html`, `app.css`, `app.js`. Legacy Tkinter tracker, CLI scripts and CSV templates removed.
+
 ## Later the same day — page fix, launch fix, spending
 
 - **The dashboard was rendering nothing.** `dashboard.html` had been left with `${printing?marketLine(e):'}` — an unterminated string, so the browser refused the entire `<script>` and no part of the page ran. Fixed, and `jscheck.py` now proves the inline script parses as part of the test suite; `test_jscheck.py` re-breaks the real page the same way to show the guard catches it. Node is not a dependency, so this is a structural scan, not a full parse.
