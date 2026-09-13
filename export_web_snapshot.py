@@ -1,11 +1,11 @@
-"""Export a slim public snapshot for the read-only web companion (streamlit_app.py).
+"""Export a public snapshot for the read-only web companion (streamlit_app.py).
 
 Run this manually, after using the desktop app (dashboard.py) at least once
 this session so data/live.json is fresh:
 
     python export_web_snapshot.py
 
-It writes data/web_snapshot.json — small enough to commit to a public GitHub
+It writes data/web_snapshot.json -- small enough to commit to a public GitHub
 repo (unlike live.json, which is 1.6MB+ and gitignored). It does NOT modify
 dashboard.py, app.js, storage.py, or any other file the live server touches,
 and it does not start or call the live server. It only reads:
@@ -15,15 +15,14 @@ and it does not start or call the live server. It only reads:
     read/refreshed exactly like dashboard.add_power() does on every page load)
   - data/rank_history.json  (the poll-trend archive dashboard.py maintains)
 
-The output aims to match everything a matchup card and the Power Ranking tab
-render on the desktop page: market line/total, our lean and confidence, the
-full "Model detail" breakdown (projected score, situational nudges, spending
-and roster-talent priors, FCS-pooling note, weather note), rest/letdown/
-lookahead notes, ATS records, weather alerts/forecasts, betting splits,
-opponent offense/defense grades, and the combined Top-50/roster-cost/talent
-tables. It intentionally still omits only truly internal plumbing (raw ESPN
-odds-provider blobs, the officiating/penalty prior, which the desktop page
-itself never displays) to keep the committed file reasonably small.
+The output is deliberately the *same shape* dashboard.py's /api/state sends
+to app.js -- {"data": wire_data(payload), "picks": [...]} -- rather than a
+reshaped/renamed subset. That lets the public site embed the real app.js
+(as web_app.js, a read-only copy) unchanged and feed it this snapshot
+directly as `state.data` / `state.picks`, with no adapter layer to maintain
+in JavaScript. wire_data() is imported straight from dashboard.py (read-only
+import; dashboard.py's server never starts unless its own __main__ runs) so
+the two stay byte-for-byte in sync with zero duplicated logic.
 """
 from __future__ import annotations
 
@@ -35,6 +34,7 @@ import nil
 import officiating
 import power
 import talent
+from dashboard import wire_data
 from storage import Store, settle
 
 FOLDER = Path(__file__).resolve().parent
@@ -108,172 +108,37 @@ def add_power(payload):
         finally:
             store.db.close()
     except Exception as e:
-        print(f'Closing-line archive unavailable: {e}')
+        payload.setdefault('warnings', []).append(f'Closing-line archive unavailable: {e}')
     spend = {}
     try:
         spend = nil.refresh(DATA)
+        if spend.get('warning'):
+            payload.setdefault('warnings', []).append(spend['warning'])
     except Exception as e:
-        print(f'School spending unavailable: {e}')
+        payload.setdefault('warnings', []).append(f'School spending unavailable: {e}')
     penalties = {}
     try:
         penalties = officiating.refresh(payload.get('history_events', []) + payload.get('events', []), DATA)
     except Exception as e:
-        print(f'Penalty data unavailable: {e}')
+        payload.setdefault('warnings', []).append(f'Penalty data unavailable: {e}')
     roster = {}
     try:
         roster = talent.refresh(DATA, payload.get('season'))
+        if roster.get('warning'):
+            payload.setdefault('warnings', []).append(roster['warning'])
     except Exception as e:
-        print(f'Roster talent unavailable: {e}')
+        payload.setdefault('warnings', []).append(f'Roster talent unavailable: {e}')
     try:
         payload['power'] = power.build(payload, date.today(), spend or None, penalties or None, roster or None)
     except Exception as e:
         payload['power'] = None
-        print(f'Power ratings failed: {e}')
+        payload.setdefault('warnings', []).append(f'Power ratings failed: {e}')
     try:
         payload['poll_trend'], payload['poll_history_weeks'] = poll_trend(payload, date.today(), DATA)
     except Exception as e:
         payload['poll_trend'], payload['poll_history_weeks'] = {}, 0
-        print(f'Poll history unavailable: {e}')
+        payload.setdefault('warnings', []).append(f'Poll history unavailable: {e}')
     return payload
-
-
-def team_grade(team_ratings_by_id, team_id):
-    """Mirror app.js's grades(e,side): offense/defense rank+grade among rated FBS teams."""
-    r = team_ratings_by_id.get(team_id)
-    if not r:
-        return None
-    return {
-        'ranked': r.get('ranked'),
-        'offense_rank': r.get('offense_rank'), 'offense_grade': r.get('offense_grade'),
-        'defense_rank': r.get('defense_rank'), 'defense_grade': r.get('defense_grade'),
-        'games': r.get('games'),
-        'ranking_population': r.get('ranking_population'), 'ranking_scope': r.get('ranking_scope'),
-    }
-
-
-def previous_game(all_events, team_id, game_date, as_of):
-    """Mirror app.js's previousGameBlock: the team's last completed game before this one."""
-    prior = [g for g in all_events if g.get('completed') and g.get('home_score') is not None and g.get('away_score') is not None
-             and g['game_date'] < game_date and (not as_of or g['game_date'] < as_of)
-             and (g.get('home_id') == team_id or g.get('away_id') == team_id)]
-    if not prior:
-        return None
-    prior.sort(key=lambda g: g['game_date'], reverse=True)
-    g = prior[0]
-    own = 'home' if g.get('home_id') == team_id else 'away'
-    other = 'away' if own == 'home' else 'home'
-    scored, allowed = g.get(own + '_score'), g.get(other + '_score')
-    result = 'Won' if scored > allowed else ('Lost' if scored < allowed else 'Tied')
-    return {'game_date': g.get('game_date'), 'opponent': g.get(other), 'result': result,
-            'scored': scored, 'allowed': allowed}
-
-
-def venue_snapshot(e):
-    v = e.get('venue') or {}
-    address = v.get('address') or {}
-    if not v and not address:
-        return None
-    return {'fullName': v.get('fullName'), 'indoor': v.get('indoor'),
-            'city': address.get('city'), 'state': address.get('state')}
-
-
-def event_snapshot(e, power_games, picks_by_event, all_events, team_ratings_by_id, as_of):
-    p = power_games.get(e['id']) or {}
-    pick = picks_by_event.get(e['id'])
-    return {
-        'id': e['id'],
-        'season': e.get('season'),
-        'week': e.get('week'),
-        'season_type': e.get('season_type'),
-        'game_date': e.get('game_date'),
-        'kickoff': e.get('kickoff'),
-        'status': e.get('status'),
-        'completed': e.get('completed'),
-        'neutral': e.get('neutral'),
-        'home': e.get('home'),
-        'away': e.get('away'),
-        'home_id': e.get('home_id'),
-        'away_id': e.get('away_id'),
-        'home_logo': e.get('home_logo'),
-        'away_logo': e.get('away_logo'),
-        'home_record': e.get('home_record'),
-        'away_record': e.get('away_record'),
-        'home_combined': e.get('home_combined'),
-        'away_combined': e.get('away_combined'),
-        'home_score': e.get('home_score'),
-        'away_score': e.get('away_score'),
-        'home_spread': e.get('home_spread'),
-        'away_spread': e.get('away_spread'),
-        'total': e.get('total'),
-        'market_source': e.get('market_source'),
-        'market_observed_at': e.get('market_observed_at'),
-        'odds_status': e.get('odds_status'),
-        'venue': venue_snapshot(e),
-        'weather': e.get('weather'),
-        'weather_status': e.get('weather_status'),
-        'home_splits': e.get('home_splits'),
-        'away_splits': e.get('away_splits'),
-        # Headline lean/projection.
-        'lean_side': p.get('lean_side'),
-        'lean_home_spread': p.get('lean_home_spread'),
-        'fair_home_spread': p.get('fair_home_spread'),
-        'confidence': p.get('confidence'),
-        'confidence_detail': p.get('confidence_detail'),
-        'lean_result': p.get('lean_result'),
-        'lean_source': p.get('lean_source'),
-        'projected_total': p.get('projected_total'),
-        'home_points': p.get('home_points'),
-        'away_points': p.get('away_points'),
-        'weather_alert': p.get('weather_alert'),
-        'weather_note': p.get('weather_note'),
-        # Full "Model detail" breakdown inputs.
-        'home_edge_points': p.get('home_edge_points'),
-        'lean_edge_points': p.get('lean_edge_points'),
-        'total_edge_points': p.get('total_edge_points'),
-        'spend_measure': p.get('spend_measure'),
-        'spend_margin_shift': p.get('spend_margin_shift'),
-        'home_spending': p.get('home_spending'),
-        'away_spending': p.get('away_spending'),
-        'home_talent': p.get('home_talent'),
-        'away_talent': p.get('away_talent'),
-        'talent_margin_shift': p.get('talent_margin_shift'),
-        'pooled_fcs': p.get('pooled_fcs'),
-        # Rest/letdown/lookahead/hostile-venue/rivalry notes and ATS records.
-        'home_notes': p.get('home_notes'),
-        'away_notes': p.get('away_notes'),
-        'home_ats': p.get('home_ats'),
-        'away_ats': p.get('away_ats'),
-        'home_previous': previous_game(all_events, e.get('home_id'), e.get('game_date'), as_of),
-        'away_previous': previous_game(all_events, e.get('away_id'), e.get('game_date'), as_of),
-        # Opponent-adjusted offense/defense grades (app.js's grades()).
-        'home_grade': team_grade(team_ratings_by_id, e.get('home_id')),
-        'away_grade': team_grade(team_ratings_by_id, e.get('away_id')),
-        'pick_side': pick.get('side') if pick else None,
-        'pick_spread': pick.get('spread') if pick else None,
-        'pick_favorite': bool(pick.get('favorite')) if pick else False,
-    }
-
-
-def pick_snapshot(row):
-    """Mirror dashboard.py's /api/state: attach the same settle() result/profit_units
-    the desktop page shows, computed from the same storage.settle(), never re-derived.
-    """
-    result, profit_units = settle(row)
-    return {
-        'id': row.get('id'),
-        'game_date': row.get('game_date'),
-        'home': row.get('home'),
-        'away': row.get('away'),
-        'side': row.get('side'),
-        'spread': row.get('spread'),
-        'odds': row.get('odds'),
-        'stake': row.get('stake'),
-        'home_score': row.get('home_score'),
-        'away_score': row.get('away_score'),
-        'result': result,
-        'profit_units': profit_units,
-        'favorite': bool(row.get('favorite')),
-    }
 
 
 def main():
@@ -285,79 +150,48 @@ def main():
 
     store = Store(DATA / 'picks.sqlite3')
     try:
-        picks = store.all()
+        rows = store.all()
     finally:
         store.db.close()
-    picks_by_event = {r['event_id']: r for r in picks if r.get('event_id')}
+    for r in rows:
+        r['result'], r['profit_units'] = settle(r)
+    # Mirror dashboard.py's /api/state wire format exactly: drop the
+    # provenance-only market_snapshot blob dashboard.py never sends either.
+    picks = [{k: v for k, v in r.items() if k != 'market_snapshot'} for r in rows]
 
-    power_data = payload.get('power') or {}
-    power_games = power_data.get('games') or {}
-    team_ratings_by_id = {t['id']: t for t in power_data.get('team_ratings') or []}
-    poll_trend_by_id = payload.get('poll_trend') or {}
-    as_of = power_data.get('as_of')
-    all_events = payload.get('events', [])
-    events = [e for e in all_events if e.get('home_combined') or e.get('away_combined')]
+    # Trim to games that actually appear on the page (app.js's own render()
+    # and renderPrint() apply this identical filter client-side, so this is a
+    # pure size reduction, not a behavior change). Full event objects --
+    # including every non-top50 game -- are kept for any team playing a
+    # top-50 opponent this week, since app.js's previousGameBlock() searches
+    # the *entire* events list (not just this week's) for a team's last game.
+    events = payload.get('events', [])
+    keep_ids = set()
+    for e in events:
+        if e.get('home_combined') or e.get('away_combined'):
+            keep_ids.add(e.get('home_id'))
+            keep_ids.add(e.get('away_id'))
+    payload['events'] = [e for e in events if e.get('home_combined') or e.get('away_combined')
+                          or e.get('home_id') in keep_ids or e.get('away_id') in keep_ids]
 
-    rankings = [
-        {'rank': t.get('power_rank'), 'team': t.get('team'), 'id': t.get('id'), 'rating': t.get('rating'),
-         'ap_rank': t.get('ap_rank'), 'combined_rank': t.get('combined_rank'), 'games': t.get('games'),
-         'trend': t.get('trend'), 'poll_trend': poll_trend_by_id.get(t.get('id')),
-         'offense_rank': t.get('offense_rank'), 'offense_grade': t.get('offense_grade'),
-         'defense_rank': t.get('defense_rank'), 'defense_grade': t.get('defense_grade'),
-         'ats': t.get('ats'), 'talent': t.get('talent'), 'spending': t.get('spending')}
-        for t in sorted(power_data.get('ratings') or [], key=lambda r: r.get('power_rank') or 999)
-    ]
-    top50 = [{'rank': t.get('rank'), 'team': t.get('team'), 'id': t.get('id'), 'logo': t.get('logo'),
-              'cbs': t.get('cbs'), 'ap': t.get('ap'), 'coaches': t.get('coaches')}
-             for t in payload.get('top50', [])]
+    # Same key set dashboard.py's /api/state sends as `data`: WIRE_OMIT drops
+    # history_events/cbs/ap/coaches (raw poll/model inputs the page never
+    # reads) and adds history_events_count in their place.
+    data = wire_data(payload)
 
-    power_meta = {
-        'as_of': power_data.get('as_of'),
-        'status': power_data.get('status'),
-        'min_games': power_data.get('min_games'),
-        'ranking_population': power_data.get('ranking_population'),
-        'ranking_scope': power_data.get('ranking_scope'),
-        'trend_since': power_data.get('trend_since'),
-        'history_weeks_tracked': power_data.get('history_weeks_tracked'),
-        'spend_fit': power_data.get('spend_fit'),
-        'spend_board': power_data.get('spend_board'),
-        'spend_labels': power_data.get('spend_labels'),
-        'spend_source': power_data.get('spend_source'),
-        'spend_fetched_at': power_data.get('spend_fetched_at'),
-        'spend_fade_games': power_data.get('spend_fade_games'),
-        'talent_fit': power_data.get('talent_fit'),
-        'talent_board': power_data.get('talent_board'),
-        'talent_source': power_data.get('talent_source'),
-        'talent_fetched_at': power_data.get('talent_fetched_at'),
-        'talent_fade_games': power_data.get('talent_fade_games'),
-        'talent_max_weight': power_data.get('talent_max_weight'),
-    }
-
-    snapshot = {
-        'season': payload.get('season'),
-        'updated_at': payload.get('updated_at'),
-        'weeks': payload.get('weeks', []),
-        'events': [event_snapshot(e, power_games, picks_by_event, all_events, team_ratings_by_id, as_of) for e in events],
-        'rankings': rankings,
-        'top50': top50,
-        'power_meta': power_meta,
-        'poll_history_weeks': payload.get('poll_history_weeks', 0),
-        'picks': [pick_snapshot(r) for r in picks],
-        # Data Health panel fields (dashboard.py's renderHealth): everything not
-        # already on power_meta, read straight off the same top-level dict
-        # dashboard.py's STATE['data'] holds (live.json mirrors it exactly).
-        'imported_count': payload.get('imported_count'),
-        'splits_count': payload.get('splits_count'),
-        'history_events_count': len(payload.get('history_events') or ()),
-        'ap_date': payload.get('ap_date'),
-        'warnings': payload.get('warnings', []),
-    }
+    # Mirror the remaining top-level fields dashboard.py's /api/state sends
+    # that app.js's state object relies on (state.today feeds
+    # previousGameBlock's "asOf" cutoff; refreshing/error drive the banner
+    # text in render() -- both are always benign/false for a static export).
+    snapshot = {'data': data, 'picks': picks, 'today': date.today().isoformat(),
+                'refreshing': False, 'error': ''}
 
     out = DATA / 'web_snapshot.json'
     temp = out.with_suffix('.tmp')
     temp.write_text(json.dumps(snapshot, separators=(',', ':')), encoding='utf-8')
     temp.replace(out)
-    print(f'Wrote {out} ({out.stat().st_size:,} bytes) with {len(snapshot["events"])} matchups.')
+    print(f'Wrote {out} ({out.stat().st_size:,} bytes) with {len(snapshot["data"].get("events", []))} events '
+          f'and {len(snapshot["picks"])} picks.')
 
 
 if __name__ == '__main__':

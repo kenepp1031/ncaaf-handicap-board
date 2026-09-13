@@ -1,24 +1,44 @@
 # Publish the NCAAF board for free
 
-This project now contains a phone-friendly Streamlit web edition in
-`streamlit_app.py`. It reads `data/web_snapshot.json`, a small committed
-snapshot, so the deployed board does not depend on the desktop program or
-this PC staying on. It never touches `dashboard.py`, `app.js`, `storage.py`,
-or any other file the live server uses, and it has no editing capability —
-saving/editing picks still only happens in the desktop app.
+This project contains a phone-friendly web edition, `streamlit_app.py`, that
+is a **pixel-identical embed of the real desktop dashboard** — not a
+Streamlit-widget reimplementation. It works by inlining a read-only copy of
+the desktop page's own markup/CSS/JS (`web_dashboard.html` + `app.css` +
+`web_app.js`) into one HTML document and rendering it with `st.iframe()`, fed
+by a static JSON snapshot instead of a live server. It never touches
+`dashboard.py`, `app.js`, `app.css`, `dashboard.html`, or `storage.py`, and it
+has no editing capability — saving/editing/starring picks still only happens
+in the desktop app.
 
-## Why a separate snapshot file (not the live cache)
+## How the embed works
 
-The desktop app's richest data — matchups, model projections, power ratings —
-lives in `data/live.json`, which is 1.6MB+, regenerated on every refresh, and
-deliberately gitignored (see `.gitignore`). The only files already tracked in
-git are `data/picks.sqlite3` (your saved picks) and `data/rank_history.json`
-(poll history), and `picks.sqlite3` alone doesn't contain the season's
-matchups or model output — just your own bets. So `export_web_snapshot.py`
-builds a small, purpose-made file (`data/web_snapshot.json`, a few hundred KB)
-containing just what the public page needs: each Top-50 matchup this season
-(teams, market spread/total, model lean/projection when available, your saved
-pick), plus the combined rankings table.
+- `export_web_snapshot.py` reads `data/live.json` (+ the picks database, poll
+  history, and refresh() caches) and writes `data/web_snapshot.json` in
+  **exactly** the shape `dashboard.py`'s `/api/state` sends to `app.js` —
+  `{"data": ..., "picks": [...], "today": ...}` — by importing and reusing
+  `dashboard.wire_data()` directly (read-only import; `dashboard.py`'s server
+  never starts unless its own `__main__` runs). No reshaping/renaming, so
+  there's nothing to keep in sync between the export and the renderer.
+- `web_app.js` is a separate copy of `app.js` (the original is untouched) with
+  every live-backend code path removed or turned into a no-op: no `/api/*`
+  polling, no token/reload-recovery, and `quickPick()`, `toggleFavorite()`,
+  `refresh()`, and the pick form's submit handler all just show an inline
+  "Editing happens in the desktop app" notice instead of calling a server.
+  Every rendering function (`matchupCard`, `renderGames`, `renderTopPicks`,
+  `renderPower`, `renderSpending`, `renderTalent`, `renderHealth`,
+  `renderPrint`, week-tab switching, theme toggle, filter tabs) is byte-for-
+  byte identical to `app.js`, so the visuals match exactly.
+- `web_dashboard.html` is a copy of `dashboard.html` referencing `web_app.js`
+  instead of `app.js`, with a small inline `<style>` block hiding the
+  write-only controls (`#editor`, `.spread-pair` quick-pick buttons,
+  `.pick-actions` Edit/★ BET buttons) as a second, purely-cosmetic layer on
+  top of the JS no-ops above.
+- `streamlit_app.py` is a thin loader: it reads those three files plus
+  `data/web_snapshot.json`, inlines the CSS into a `<style>` tag, assigns the
+  snapshot to `window.__SNAPSHOT__` in an inline `<script>`, inlines
+  `web_app.js` in another, and hands the combined HTML string to
+  `st.iframe(page, height="content")`. It contains almost no UI logic of its
+  own.
 
 ## Publish it
 
@@ -32,11 +52,11 @@ pick), plus the combined rankings table.
 
    This writes `data/web_snapshot.json`.
 3. Create a public GitHub repository and upload this folder, including
-   `streamlit_app.py`, `requirements.txt`, `export_web_snapshot.py`, and
-   `data/web_snapshot.json`. Do **not** upload `data/live.json`, `data/nil.json`,
-   `data/talent.json`, `data/penalties.json`, `data/locations.json`, or
-   `data/servers.json` — those stay gitignored, refetchable, and unnecessary
-   for the public view.
+   `streamlit_app.py`, `web_app.js`, `web_dashboard.html`, `app.css`,
+   `requirements.txt`, `export_web_snapshot.py`, and `data/web_snapshot.json`.
+   Do **not** upload `data/live.json`, `data/nil.json`, `data/talent.json`,
+   `data/penalties.json`, `data/locations.json`, or `data/servers.json` —
+   those stay gitignored, refetchable, and unnecessary for the public view.
 4. Go to [Streamlit Community Cloud](https://share.streamlit.io/) and sign in.
 5. Select **Create app**, select the GitHub repository, and choose
    `streamlit_app.py` as the entry point.
@@ -61,22 +81,15 @@ website from needing access to your home computer.
 ## Limitations of the web edition
 
 - No editing: saving, editing, or starring picks only works in the desktop
-  app. The web page is read-only.
+  app. The web page is read-only — every write control is hidden, and any JS
+  path that could still reach one shows an inline notice instead of failing
+  silently.
 - The snapshot is only as fresh as your last `export_web_snapshot.py` run —
   there's no live polling like the desktop app's 5-second refresh.
-- Only Top-50/ranked matchups are included (matching what the desktop app's
-  print/board views consider "this week's games"); games between two
-  unranked teams aren't in the snapshot.
-- The snapshot now includes weather forecasts/alerts, betting splits,
-  opponent-adjusted offense/defense grades, ATS records, rest/letdown/
-  lookahead/hostile-venue notes, the full "Model detail" breakdown (spending
-  and roster-talent priors, FCS-pooling note, situational nudges), the
-  spending/talent leaderboards, a "top picks this week" banner, the full
-  season picks log with W/L/push/net-units metrics, and a "Data health"
-  diagnostics panel — matching the desktop's matchup card, Power Ranking tab,
-  Picks tab, and health panel. It still leaves out the officiating/penalty
-  prior and raw ESPN odds-provider internals, since the desktop page itself
-  never displays those.
+- The snapshot keeps the full events list needed for accurate "previous game"
+  lookups (any game involving a team that plays a Top-50 opponent this week),
+  not just this week's Top-50 games, so it's larger than a purely filtered
+  export but still a small fraction of the gitignored `live.json`.
 - Poll-trend movement (the "Poll trend" column) only shows once
   `data/rank_history.json` has more than one archived week for the current
   week — that file is only written by the desktop app while it runs, so a

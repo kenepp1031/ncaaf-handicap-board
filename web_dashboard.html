@@ -1,0 +1,62 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>College Football · My Picks</title>
+<link rel="stylesheet" href="/app.css">
+<style>
+/* Public, read-only companion: this page reuses the desktop app's exact
+   markup/CSS/JS so the visuals match 1:1, but hides every control that
+   would try to write back to a server that doesn't exist here. The
+   underlying JS functions (quickPick, toggleFavorite, refresh, the pick
+   form's submit handler) are also neutered in web_app.js as a second,
+   defensive layer -- so even a control this CSS misses shows an inline
+   notice instead of silently failing. */
+#editor,.spread-pair,.pick-actions,#refreshBtn{display:none!important}
+</style>
+
+<header><div><div class="tag">YOUR SEASON. YOUR RECORD.</div><h1>College Football Picks</h1><p>Pick this week’s games against the spread. Keep every line you took.</p></div><div class="bar"><button id="themeToggle" onclick="toggleTheme()"></button></div></header>
+<div id="notice" role="status"></div>
+<nav class="viewtabs" role="tablist" aria-label="Sections">
+ <button role="tab" data-view="week" aria-selected="true">This Week</button>
+ <button role="tab" data-view="power">Power Ranking</button>
+ <button role="tab" data-view="print">Print</button>
+</nav>
+<section id="view-week">
+ <nav id="weektabs" class="weeks" role="tablist" aria-label="Season weeks"></nav>
+ <div class="bar"><button onclick="currentWeek()">Jump to current week</button><span id="weektitle"></span><span class="pill">Our combined Top 50</span></div>
+ <p id="source">Loading the published season…</p>
+
+ <section class="card" id="toppicks-card" hidden><div style="padding:20px"><h2>Our highest-confidence games this week</h2><small>Moderate-confidence leans only — the model's highest available rating. Not a guarantee; see each card's Model detail for the reasoning.</small></div><div id="toppicks" class="match-list"></div></section>
+
+ <section class="card" style="padding:0;overflow:hidden"><div style="padding:20px"><h2 id="matchtitle">This week’s matchups</h2><small>Read-only companion — the model's lean and confidence for each game. Editing picks happens in the desktop app.</small></div><div class="match-head"><span>Home team · venue</span><span>Over / under · spread</span><span>Away team</span></div><div id="games" class="match-list"></div></section>
+ <section class="card" id="editor" hidden><h2 id="formtitle">Record your pick</h2><form id="pickform"><input type="hidden" name="id"><input type="hidden" name="event_id"><label>Game date<input type="date" name="game_date" required></label><label>Away school<input name="away" required></label><label>Home school<input name="home" required></label><label>Your side<select name="side" onchange="sideChanged()"><option>Home</option><option>Away</option></select></label><label>Your team’s spread<input name="spread" type="number" step="0.5" required placeholder="e.g. -7.5 or +7.5"></label><label>American odds<input name="odds" type="number" step="1" required value="-110"></label><label>Units risked<input name="stake" type="number" step="0.01" min="0.01" required value="1"></label><label>Away final score<input name="away_score" type="number" min="0" step="1"></label><label>Home final score<input name="home_score" type="number" min="0" step="1"></label><label>Your reason / notes<input name="notes"></label><label>Real bet?<span class="bar" style="padding-top:8px"><input type="checkbox" name="favorite" style="width:auto"> <small>Check if you actually placed this bet</small></span></label><div class="full muted" id="pickcontext">Choose a matchup above to fill in its available line, or enter a pick here.</div><div class="full bar"><button class="primary" type="submit">Save pick</button><button type="button" onclick="clearForm()">Clear / new pick</button><small>Favorite = negative spread. Underdog = positive. Your saved line stays fixed on refresh.</small></div></form></section>
+ <section class="card"><div class="bar"><h2 style="margin-right:auto">My picks this week</h2><div class="filtertabs"><button class="filtertab" data-filter="all" aria-selected="true">All picks</button><button class="filtertab" data-filter="bets" aria-selected="false">★ My bets only</button></div></div><div id="metrics" class="metrics"></div><div class="scroll"><table><thead><tr><th></th><th>Date</th><th>Matchup</th><th>My ATS pick</th><th>Odds · units</th><th>Final away–home</th><th>Result</th><th>Net units</th><th></th></tr></thead><tbody id="picks"></tbody></table></div><p id="allstats" class="muted"></p></section>
+</section>
+<section id="view-power" hidden>
+ <details class="card"><summary>Our Top 50 teams · combined rankings</summary><p class="muted">Equal weight for CBS, AP and Coaches after adjusting for list length. AP appears once. A game is included when either team is in our Top 50.</p><div id="roster" class="roster"></div></details>
+ <section class="card">
+  <h2>Power Ranking</h2>
+  <p class="muted" id="powerstatus"></p>
+  <p class="muted">Offense and defense show numeric ranks and letter grades among rated FBS teams. The number beside a team name is its combined poll position. Offense/defense ranks and percentile letter grades use the same FBS comparison pool. Higher ratings indicate stronger opponent-adjusted scoring performance. Early-season samples are limited. The overall ranking blends model order with polls; game projections use scoring history. Confidence is qualitative, not a tested win percentage. Trend compares the live ranking to the start of <span id="trendsince">this week</span>; historical trends use current poll context.</p>
+  <div class="scroll"><table><thead><tr><th>Rank</th><th>Team</th><th>Trend</th><th>Rating</th><th>Off</th><th>Def</th><th title="247Sports Team Talent Composite rank">Roster talent</th><th>Games</th><th>ATS</th><th>AP</th><th>Combined poll</th><th>Poll trend</th></tr></thead><tbody id="powerbody"></tbody></table></div>
+ </section>
+ <details class="card"><summary>Roster talent · 247Sports Team Talent Composite</summary>
+  <p class="muted" id="talentnote"></p>
+  <div class="scroll"><table><thead><tr><th>#</th><th>School</th><th>Talent score</th><th>Avg player rating</th><th>5★</th><th>4★</th><th>3★</th><th>Rated players</th></tr></thead><tbody id="talentbody"></tbody></table></div>
+ </details>
+ <details class="card"><summary>School spending · roster cost and athletic department expenses</summary>
+  <p class="muted" id="spendnote"></p>
+  <div class="scroll"><table><thead><tr><th>#</th><th>School</th><th>Est. roster cost</th><th>Athletic dept. expenses</th></tr></thead><tbody id="spendbody"></tbody></table></div>
+ </details>
+ <details class="card"><summary>Data health · what this refresh actually pulled in</summary>
+  <p class="muted">Source counts and model inputs behind the numbers above. These are provenance figures, not predictive signals.</p>
+  <div id="healthbody" class="health"></div>
+ </details>
+</section>
+<section id="view-print" hidden>
+ <section class="card">
+  <div class="bar"><h2 style="margin-right:auto">Print — <span id="printweek"></span></h2><label class="bar"><input id="highlightPicks" type="checkbox" style="width:auto" onchange="renderPrint()"> Highlight my picks</label><button onclick="document.getElementById('view-print').classList.toggle('ink-saving')">Color / ink-saving</button><button class="primary" onclick="window.print()">Print this week</button></div>
+  <p class="muted">Offense and defense ranks with letter grades · market spread · our ATS lean and confidence · game context.</p>
+  <div id="printboard"></div>
+ </section>
+</section>
+<footer><small>Public read-only companion to the desktop tracker — published from a snapshot, not a live feed. <a target="_blank" rel="noreferrer" href="https://www.espn.com/college-football/rankings">ESPN / AP</a> · <a target="_blank" rel="noreferrer" href="https://www.cbssports.com/college-football/rankings/cbs-sports-rankings/">CBS rankings</a> · <a target="_blank" rel="noreferrer" href="https://open-meteo.com/">Weather by Open-Meteo</a> · <a target="_blank" rel="noreferrer" href="https://dknetwork.draftkings.com/draftkings-sportsbook-betting-splits/?tb_eg=NCAA+Football">DraftKings splits</a> · Power-ratings situational notes follow <a target="_blank" rel="noreferrer" href="https://www.thesportsgeek.com/sports-betting/college-football/strategy/">TheSportsGeek</a> and <a target="_blank" rel="noreferrer" href="https://www.sportscapping.com/articles/college-football-handicapping">SportsCapping</a> · Hostile-venue notes follow <a target="_blank" rel="noreferrer" href="https://www.espn.com/college-football/story/_/id/40559641/top-25-college-football-stadiums-lsu-rose-bowl-michigan">ESPN's Top 25 stadiums ranking</a></small></footer>
+<script src="/web_app.js" defer></script>
+</html>
