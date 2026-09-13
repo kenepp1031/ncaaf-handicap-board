@@ -237,10 +237,15 @@ with st.container(horizontal=True):
     st.metric("Saved picks", picked, border=True)
     st.metric("Starred bets", starred, border=True)
 
-st.subheader(f"Week {week} matchups" if week is not None else "This week's matchups")
-if not week_games:
-    st.info("No Top 50 matchups in this snapshot's schedule.")
-for game in week_games:
+def confidence_rating(game: dict) -> int | None:
+    """Mirror app.js's confidenceRating(): edge points (1.0-4.0) onto a 1-10 display rating."""
+    edge = game.get("lean_edge_points")
+    if edge is None:
+        return None
+    return max(1, min(10, round(edge * 2.5)))
+
+
+def render_matchup_card(game: dict) -> None:
     home, away = game["home"], game["away"]
     with st.container(border=True):
         st.caption(kickoff_text(game.get("kickoff")))
@@ -308,6 +313,28 @@ for game in week_games:
         st.caption(f"{game.get('market_source') or 'No odds supplied by provider'}"
                    + (f" · {game['market_observed_at'][:10]}" if game.get("market_observed_at") else ""))
 
+
+# Top picks banner (app.js's renderTopPicks): up to 5 non-completed games this
+# week with a lean, ranked by |lean_edge_points| descending. Hidden entirely
+# (not shown empty) when none qualify -- early season often has none.
+top_picks = sorted(
+    (g for g in week_games if not g.get("completed") and g.get("lean_side")),
+    key=lambda g: abs(g.get("lean_edge_points") or 0),
+    reverse=True,
+)[:5]
+if top_picks:
+    st.subheader("Our top picks this week")
+    for game in top_picks:
+        rating = confidence_rating(game)
+        st.markdown(f"**Confidence {rating if rating is not None else '—'}/10**")
+        render_matchup_card(game)
+
+st.subheader(f"Week {week} matchups" if week is not None else "This week's matchups")
+if not week_games:
+    st.info("No Top 50 matchups in this snapshot's schedule.")
+for game in week_games:
+    render_matchup_card(game)
+
 st.subheader("Our Top 50 teams · combined rankings")
 if top50:
     st.dataframe(
@@ -368,5 +395,68 @@ if spend_board:
               "Athletic dept. expenses": money(r.get("athletic_expenses"))} for r in spend_board],
             hide_index=True, width="stretch",
         )
+
+st.subheader("Season picks")
+picks = snapshot.get("picks", [])
+bets_only = st.toggle("Bets only (starred picks)", value=False)
+shown_picks = [p for p in picks if p.get("favorite")] if bets_only else picks
+w = sum(1 for p in shown_picks if p.get("result") == "Win")
+l = sum(1 for p in shown_picks if p.get("result") == "Loss")
+push = sum(1 for p in shown_picks if p.get("result") == "Push")
+pending = sum(1 for p in shown_picks if p.get("result") == "Pending")
+net = sum(p.get("profit_units") or 0 for p in shown_picks)
+with st.container(horizontal=True):
+    st.metric("Record", f"{w}-{l}-{push}", border=True)
+    st.metric("Pending", pending, border=True)
+    st.metric("ATS win rate", f"{100*w/(w+l):.1f}%" if (w + l) else "—", border=True)
+    st.metric("Net units", f"{net:+.2f}", border=True)
+if shown_picks:
+    st.dataframe(
+        [{
+            "Date": p.get("game_date"),
+            "Matchup": f"{p.get('away')} @ {p.get('home')}",
+            "Pick": f"{p.get('side') == 'Home' and p.get('home') or p.get('away')} {spread_text(p.get('spread'))}",
+            "Odds · units": f"{p.get('odds'):+.0f} · {p.get('stake')}" if p.get("odds") is not None else "—",
+            "Score": "—" if p.get("result") == "Pending" else f"{p.get('away_score')}–{p.get('home_score')}",
+            "Result": p.get("result"),
+            "Profit (units)": "—" if p.get("result") == "Pending" else f"{p.get('profit_units'):+.2f}",
+            "★": "★" if p.get("favorite") else "",
+        } for p in shown_picks],
+        hide_index=True, width="stretch",
+    )
+else:
+    st.info("No bets marked yet." if bets_only else "No saved picks in this snapshot.")
+
+with st.expander("Data health"):
+    missing = [g for g in week_games if g.get("home_spread") is None]
+    fit = ((power_meta.get("spend_fit") or {}).get("roster"))
+    talent_fit = power_meta.get("talent_fit")
+    health_rows = [
+        ("Season", snapshot.get("season")),
+        ("Feed last refreshed", snapshot.get("updated_at")),
+        ("Games imported this refresh", snapshot.get("imported_count")),
+        ("Betting-splits rows read", snapshot.get("splits_count")),
+        ("Previous-season games cached", snapshot.get("history_events_count")),
+        ("AP poll dated", snapshot.get("ap_date")),
+        ("Model fit as of", power_meta.get("as_of")),
+        ("Ranking comparison pool", f"{power_meta['ranking_population']} {power_meta.get('ranking_scope') or 'teams'}"
+         if power_meta.get("ranking_population") is not None else None),
+        ("Games needed to be rated", power_meta.get("min_games")),
+        ("Model weeks reconstructed", power_meta.get("history_weeks_tracked")),
+        ("Poll snapshots archived", snapshot.get("poll_history_weeks")),
+        ("Spending figures loaded", len(power_meta.get("spend_board") or []) or None),
+        ("Roster cost vs rating fit", f"{fit['points_per_doubling']} pts per doubling · R² {fit['r_squared']} · {fit['teams']} schools" if fit else None),
+        ("Roster talent loaded", len(power_meta.get("talent_board") or []) or None),
+        ("Roster talent vs rating fit", f"{talent_fit['slope']} pts per point of average rating · R² {talent_fit['r_squared']} · {talent_fit['teams']} schools" if talent_fit else None),
+        ("Games shown this week", len(week_games)),
+        ("Shown games with no market spread", ", ".join(f"{g['away']} at {g['home']}" for g in missing) if missing else "Every shown game has a provider line."),
+    ]
+    for label, value in health_rows:
+        st.caption(f"**{label}:** {value if value not in (None, '') else '—'}")
+    warnings = snapshot.get("warnings") or []
+    if warnings:
+        st.markdown("**Refresh warnings**")
+        for warning in warnings:
+            st.caption(warning)
 
 st.caption("Lines, model leans, rankings, and picks are research context. Verify current information before making any decision.")

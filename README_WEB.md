@@ -70,11 +70,13 @@ website from needing access to your home computer.
 - The snapshot now includes weather forecasts/alerts, betting splits,
   opponent-adjusted offense/defense grades, ATS records, rest/letdown/
   lookahead/hostile-venue notes, the full "Model detail" breakdown (spending
-  and roster-talent priors, FCS-pooling note, situational nudges), and the
-  spending/talent leaderboards — matching the desktop's matchup card and
-  Power Ranking tab. It still leaves out the officiating/penalty prior and
-  raw ESPN odds-provider internals, since the desktop page itself never
-  displays those.
+  and roster-talent priors, FCS-pooling note, situational nudges), the
+  spending/talent leaderboards, a "top picks this week" banner, the full
+  season picks log with W/L/push/net-units metrics, and a "Data health"
+  diagnostics panel — matching the desktop's matchup card, Power Ranking tab,
+  Picks tab, and health panel. It still leaves out the officiating/penalty
+  prior and raw ESPN odds-provider internals, since the desktop page itself
+  never displays those.
 - Poll-trend movement (the "Poll trend" column) only shows once
   `data/rank_history.json` has more than one archived week for the current
   week — that file is only written by the desktop app while it runs, so a

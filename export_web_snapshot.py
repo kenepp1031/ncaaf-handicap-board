@@ -35,7 +35,7 @@ import nil
 import officiating
 import power
 import talent
-from storage import Store
+from storage import Store, settle
 
 FOLDER = Path(__file__).resolve().parent
 DATA = FOLDER / 'data'
@@ -254,6 +254,28 @@ def event_snapshot(e, power_games, picks_by_event, all_events, team_ratings_by_i
     }
 
 
+def pick_snapshot(row):
+    """Mirror dashboard.py's /api/state: attach the same settle() result/profit_units
+    the desktop page shows, computed from the same storage.settle(), never re-derived.
+    """
+    result, profit_units = settle(row)
+    return {
+        'id': row.get('id'),
+        'game_date': row.get('game_date'),
+        'home': row.get('home'),
+        'away': row.get('away'),
+        'side': row.get('side'),
+        'spread': row.get('spread'),
+        'odds': row.get('odds'),
+        'stake': row.get('stake'),
+        'home_score': row.get('home_score'),
+        'away_score': row.get('away_score'),
+        'result': result,
+        'profit_units': profit_units,
+        'favorite': bool(row.get('favorite')),
+    }
+
+
 def main():
     cache = DATA / 'live.json'
     if not cache.exists():
@@ -320,6 +342,15 @@ def main():
         'top50': top50,
         'power_meta': power_meta,
         'poll_history_weeks': payload.get('poll_history_weeks', 0),
+        'picks': [pick_snapshot(r) for r in picks],
+        # Data Health panel fields (dashboard.py's renderHealth): everything not
+        # already on power_meta, read straight off the same top-level dict
+        # dashboard.py's STATE['data'] holds (live.json mirrors it exactly).
+        'imported_count': payload.get('imported_count'),
+        'splits_count': payload.get('splits_count'),
+        'history_events_count': len(payload.get('history_events') or ()),
+        'ap_date': payload.get('ap_date'),
+        'warnings': payload.get('warnings', []),
     }
 
     out = DATA / 'web_snapshot.json'
