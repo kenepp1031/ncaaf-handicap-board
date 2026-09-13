@@ -67,7 +67,21 @@ website from needing access to your home computer.
 - Only Top-50/ranked matchups are included (matching what the desktop app's
   print/board views consider "this week's games"); games between two
   unranked teams aren't in the snapshot.
-- Weather details, injury-style notes, betting splits, spending/talent
-  detail tables, and full model-detail breakdowns shown in the desktop app's
-  "Model detail" panel are left out of the snapshot to keep it small; only
-  the headline lean, projected score/total, and confidence are included.
+- The snapshot now includes weather forecasts/alerts, betting splits,
+  opponent-adjusted offense/defense grades, ATS records, rest/letdown/
+  lookahead/hostile-venue notes, the full "Model detail" breakdown (spending
+  and roster-talent priors, FCS-pooling note, situational nudges), and the
+  spending/talent leaderboards — matching the desktop's matchup card and
+  Power Ranking tab. It still leaves out the officiating/penalty prior and
+  raw ESPN odds-provider internals, since the desktop page itself never
+  displays those.
+- Poll-trend movement (the "Poll trend" column) only shows once
+  `data/rank_history.json` has more than one archived week for the current
+  week — that file is only written by the desktop app while it runs, so a
+  brand-new season/week can show blank trend until the desktop app has run
+  at least twice.
+- The closing-line archive (`data/picks.sqlite3`'s `market_lines` table) is
+  read, not written, by `export_web_snapshot.py` — it restores completed
+  games' pre-kickoff spread for accurate ATS records, but only lines the
+  desktop app already captured while running are available; it never adds
+  new capture rows itself.
