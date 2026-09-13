@@ -26,7 +26,17 @@ Roster cost also feeds a prior on the projected margin, fitted fresh each refres
 
 Athletic department budgets are reference only and never move a spread. Fitted across FBS and FCS together, that line puts a Power 4 host about three points above an FCS visitor where the ratings say eleven and the market says fifty-six; shrinking toward it made those projections worse. Because the prior works by pulling a team toward the fitted line, it favours whichever side sits furthest below its own payroll, which is not always the bigger spender.
 
-Confidence is a qualitative Low/Moderate label, not a calibrated cover probability. Moderate requires at least four current-season games for both sides and an absolute edge of at least three points. No High label is issued. The model has not demonstrated profitable out-of-sample ATS performance. Rosters, injuries, returning production and play-level efficiency are not modeled. Reconstructed ranking trends use current poll context, not historical poll knowledge.
+Confidence is a qualitative Low/Moderate label, not a calibrated cover probability. Moderate requires at least four current-season games for both sides and an absolute edge of at least three points. No High label is issued. The model has not demonstrated profitable out-of-sample ATS performance. Roster talent enters only as the light prior described under Roster talent; injuries, returning production and play-level efficiency are not modeled. Reconstructed ranking trends use current poll context, not historical poll knowledge.
+
+## Roster talent
+
+Power Ranking lists every FBS roster from 247Sports' Team Talent Composite — each player on the roster rated by his recruiting grade, summarized as rated players, 5-, 4- and 3-star counts, average player rating and 247's weighted talent score — cached weekly in `data/talent.json`. The Power Ranking table carries each team's talent rank, and each matchup's Model detail shows both sides' average rating.
+
+Average player rating feeds a prior on the projected margin, built like the roster-cost prior: team rating is regressed on it fresh each refresh, and each FBS team is pulled 20% of the way toward the rating its roster implies before it has played, fading to zero at eight games this season. Unlike roster cost, an FCS opponent with no composite row sits out while its FBS opponent is still measured. Last season's composite is never used for the current season.
+
+It was chosen by the same walk-forward test as the model settings: each 2025 game predicted only from earlier games using 2025's composite, then confirmed once on 2026's first 100 games. On 2025 it made no measurable difference (mean margin error 12.665 to 12.649); on the 2026 holdout error fell from 17.20 to 16.89. Against the week of Sept. 12's 84 DraftKings lines it made no net difference once every other adjustment is included (average gap 6.57 to 6.58 points): closer on FBS-vs-FCS games, further on FBS-vs-FBS ones. Average rating beat 247's talent score, adding 247's transfer-portal class, and last season's talent change, which made 2025 worse. It is deliberately a nudge and does not close the biggest gaps with the market. Set `MAX_WEIGHT = 0` in `talent.py` to disable it.
+
+The 2026 composite grades players by 247's own high-school ratings, not a transfer grade. Returning production is not modeled: the free tables cover 2026 alone, so it cannot be tested the same way.
 
 ## Weather and print
 
@@ -38,7 +48,7 @@ Print shows offense/defense ranks and letters beside the teams, with spread, tot
 
 Power Ranking also carries a Data health panel: feed counts, poll dates, the fitted spending slope, and which of this week's games have no market spread.
 
-`data/picks.sqlite3` stores picks and captured market snapshots. `data/live.json` stores feeds. `nil.json` caches school spending and `servers.json` tracks running instances. `history-YYYY.json` caches prior-season scores, `locations.json` caches city coordinates, and `rank_history.json` preserves observed poll snapshots. Missing provider odds remain missing; no betting lines are invented.
+`data/picks.sqlite3` stores picks and captured market snapshots. `data/live.json` stores feeds. `nil.json` caches school spending, `talent.json` caches the 247Sports roster talent composite and `servers.json` tracks running instances. `history-YYYY.json` caches prior-season scores, `locations.json` caches city coordinates, and `rank_history.json` preserves observed poll snapshots. Missing provider odds remain missing; no betting lines are invented.
 
 ESPN removes the odds from a game once it kicks off, so the app archives lines itself: every sync records each upcoming game's spread, total and prices in the `market_lines` table whenever they change, and the last capture before kickoff becomes that game's closing line. Completed games get their closing line back in memory before the model runs, which is what lets ATS records and the letdown note work. Archiving began on 2026-09-10; nothing earlier can be recovered, so ATS records fill in only for games played after that. The cards say "capturing lines since …" until a team has one.
 

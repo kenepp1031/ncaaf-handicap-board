@@ -1,5 +1,6 @@
 """Launch the Python pick tracker in a local browser. Data stays in SQLite."""
 import json
+import gzip
 import math
 import os
 import secrets
@@ -14,7 +15,9 @@ from storage import Store, settle, summary
 from feeds import refresh
 import nil
 import power
+import officiating
 import servers
+import talent
 
 FOLDER = Path(__file__).resolve().parent
 DATA = FOLDER/'data'
@@ -119,6 +122,10 @@ def record_lines(payload, capture=True):
         line = closing.get(e['id'])
         if e.get('completed') and e.get('home_spread') is None and line and line['home_spread'] is not None:
             e['home_spread'] = line['home_spread']
+            e['away_spread'] = -line['home_spread']
+            e['home_odds'] = line['home_odds']
+            e['away_odds'] = line['away_odds']
+            e['total'] = line['total']
             e['closing_line_captured_at'] = line['captured_at']
     payload['lines_captured_since'] = since
     return payload
@@ -138,8 +145,20 @@ def add_power(payload):
             payload.setdefault('warnings', []).append(spend['warning'])
     except Exception as e:
         payload.setdefault('warnings', []).append('School spending unavailable: '+str(e))
+    penalties = {}
     try:
-        payload['power'] = power.build(payload, date.today(), spend or None)
+        penalties = officiating.refresh(payload.get('history_events', [])+payload.get('events', []), DATA)
+    except Exception as e:
+        payload.setdefault('warnings', []).append('Penalty data unavailable: '+str(e))
+    roster = {}
+    try:
+        roster = talent.refresh(DATA, payload.get('season'))
+        if roster.get('warning'):
+            payload.setdefault('warnings', []).append(roster['warning'])
+    except Exception as e:
+        payload.setdefault('warnings', []).append('Roster talent unavailable: '+str(e))
+    try:
+        payload['power'] = power.build(payload, date.today(), spend or None, penalties or None, roster or None)
     except Exception as e:
         payload['power'] = None
         payload.setdefault('warnings', []).append('Power ratings failed: '+str(e))
@@ -272,9 +291,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def send(self, data, status=200, kind='application/json'):
         content = data.encode('utf-8') if isinstance(data, str) else json.dumps(data).encode('utf-8')
+        # Browsers advertise gzip by default.  Compress text responses here so
+        # the sizeable season payload and the static app assets do not cross
+        # localhost as raw UTF-8; tiny responses stay smaller uncompressed.
+        zipped = 'gzip' in self.headers.get('Accept-Encoding', '').lower() and len(content) >= 512
+        if zipped:
+            content = gzip.compress(content)
         self.send_response(status)
         self.send_header('Content-Type', kind+'; charset=utf-8')
         self.send_header('Content-Length', str(len(content)))
+        if zipped:
+            self.send_header('Content-Encoding', 'gzip')
+            self.send_header('Vary', 'Accept-Encoding')
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.end_headers()

@@ -19,6 +19,7 @@ PAGE = '''
 <tr><td>Ohio State</td><td>1</td><td>FBS</td><td>Big Ten</td><td>Big Ten</td><td>295,265,883</td></tr>
 <tr><td>Miami</td><td>8</td><td>FBS</td><td>ACC</td><td>ACC</td><td>230,484,608</td></tr>
 <tr><td>Miami</td><td>139</td><td>FBS</td><td>MAC</td><td>MAC</td><td>40,792,930</td></tr>
+<tr><td>Louisiana - Monroe</td><td>250</td><td>FBS</td><td>Sun Belt</td><td>Sun Belt</td><td>20,557,764</td></tr>
 <tr><td>Prairie View A&amp;M</td><td>300</td><td>FCS</td><td>SWAC</td><td>SWAC</td><td>18,000,000</td></tr>
 <tr><td>Some Lacrosse School</td><td>310</td><td></td><td></td><td></td><td>9,000,000</td></tr></table>
 '''
@@ -60,7 +61,7 @@ class KeyTests(unittest.TestCase):
     def test_formal_names_reach_the_scoreboards_short_name(self):
         for formal, expected in (('Louisiana State', 'lsu'), ('Southern Cal', 'usc'), ('Texas Christian', 'tcu'),
                                  ('Southern Methodist', 'smu'), ('Central Florida', 'ucf'),
-                                 ('Louisiana - Monroe', 'ullmonroe'), ('Mississippi', 'olemiss')):
+                                 ('Louisiana - Monroe', 'ulmonroe'), ('Mississippi', 'olemiss')):
             self.assertEqual(nil.key(formal), expected, formal)
 
 
@@ -206,6 +207,12 @@ class CacheAndBoardTests(unittest.TestCase):
         self.assertEqual(nil.spending(stored, 'LSU')['roster_cost'], 40966000)
         self.assertEqual(nil.spending(stored, 'Prairie View A&M')['athletic_expenses'], 18000000)
         self.assertEqual(nil.spending(stored, 'Nowhere State'), {'roster_cost': None, 'athletic_expenses': None})
+
+    def test_ul_monroe_finds_the_louisiana_monroe_expense_row(self):
+        # Regression: the alias keyed the row 'ullmonroe' while the scoreboard's
+        # "UL Monroe" normalises to 'ulmonroe', so ULM never showed its expenses.
+        stored = nil.parse(PAGE)
+        self.assertEqual(nil.spending(stored, 'UL Monroe')['athletic_expenses'], 20557764)
 
 
 if __name__ == '__main__':

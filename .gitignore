@@ -13,6 +13,7 @@ data/live.json
 data/history-*.json
 data/locations.json
 data/nil.json
+data/talent.json
 
 # Deliberately NOT ignored, because neither can be recovered if lost:
 #   data/picks.sqlite3     your saved picks and wagers

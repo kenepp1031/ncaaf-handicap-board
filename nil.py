@@ -67,7 +67,7 @@ CONFERENCE_KEYS = {('miami', 'MAC'): 'miamiohio'}
 ALIASES = {'louisianastate': 'lsu', 'southerncal': 'usc', 'southerncalifornia': 'usc',
            'brighamyoung': 'byu', 'texaschristian': 'tcu', 'southernmethodist': 'smu',
            'centralflorida': 'ucf', 'southernmississippi': 'southernmiss',
-           'louisianamonroe': 'ullmonroe', 'louisianalafayette': 'louisiana',
+           'louisianamonroe': 'ulmonroe', 'louisianalafayette': 'louisiana',
            'floridainternational': 'fiu', 'floridaatlantic': 'fau',
            'texasarlington': 'uta', 'alabamabirmingham': 'uab', 'texassanantonio': 'utsa',
            'texaselpaso': 'utep', 'nevadalasvegas': 'unlv', 'miamiflorida': 'miami',

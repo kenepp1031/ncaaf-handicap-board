@@ -3,6 +3,8 @@ from datetime import date
 from handicap import Model
 from feeds import normal
 import nil
+import officiating
+import talent
 
 MIN_GAMES = 2
 # Chosen by walk-forward test: every 2025 game predicted only from games before
@@ -332,7 +334,7 @@ def team_names(events):
     return names
 
 
-def build(payload, as_of, spend=None):
+def build(payload, as_of, spend=None, penalties=None, roster=None):
     """Return power ratings and per-game notes for the cached season.
 
     Ratings use every completed FBS result before as_of, regardless of which
@@ -342,6 +344,14 @@ def build(payload, as_of, spend=None):
     `spend` is the cached school-spending tables. When supplied, a spending
     prior nudges the projected margin for teams the model has barely seen this
     season; see nil.py for why it is a prior and not a term in the spread.
+
+    `penalties` is the cached box-score penalty table. When supplied, a
+    penalty-tendency prior nudges the margin for both FBS sides of a game; see
+    officiating.py for why this tracks teams rather than referees.
+
+    `roster` is this season's cached 247Sports talent composite. When supplied,
+    a roster-talent prior pulls each FBS side toward the rating its players'
+    recruiting grades imply until it has played enough games; see talent.py.
     """
     events = payload.get('events', [])
     combined = {t['id']: t['rank'] for t in payload.get('top50', [])}
@@ -362,6 +372,9 @@ def build(payload, as_of, spend=None):
              if completed_rows else None)
     ratings = {r['team']: r for r in model.ratings()} if model else {}
     spend_fits = nil.fit(spend, ratings, names) if spend else None
+    off_rates = officiating.team_rates(events + payload.get('history_events', []), penalties) if penalties else {}
+    off_fit = officiating.fit(ratings, off_rates) if off_rates else None
+    talent_fit = talent.fit(roster, ratings, names) if roster else None
     season_games = {}
     for x in events:
         if x.get('completed') and x['game_date'] < as_of.isoformat():
@@ -374,6 +387,7 @@ def build(payload, as_of, spend=None):
                              'rating': r['rating'] if r else None, 'offense': r['offense'] if r else None,
                              'defense': r['defense'] if r else None, 'games': r['games'] if r else 0,
                              'spending': nil.spending(spend, names.get(tid, '')) if spend else None,
+                             'talent': talent.lookup(roster, names.get(tid, '')),
                              'ats': ats_record(team_games(tid), tid, as_of)})
     peer_ids = {tid for tid in ratings if fbs_key(names.get(tid,'')) in fbs_names} if fbs_names else set(ratings)
     peers = [ratings[tid] for tid in peer_ids]
@@ -411,8 +425,6 @@ def build(payload, as_of, spend=None):
         team_ratings.append(t)
     games = {}
     for e in events:
-        if e.get('completed') or date.fromisoformat(e['game_date']) < as_of:
-            continue
         hid, aid = e['home_id'], e['away_id']
         away_notes = situational_notes(team_games(aid), aid, e.get('home_combined'), e['game_date'], combined)
         hostile = hostile_environment_note(e['home'], e.get('neutral'))
@@ -450,10 +462,23 @@ def build(payload, as_of, spend=None):
             away_spend = nil.spending(spend, e['away']) if spend else None
             margin_shift, spend_measure = nil.margin_shift(spend_fits, home_spend, away_spend, hr['rating'], ar['rating'],
                                                            season_games.get(hid, 0), season_games.get(aid, 0))
+            off_shift = 0.0
+            if off_fit and home_model == hid and away_model == aid:
+                off_shift = officiating.margin_shift(off_fit, off_rates.get(hid), off_rates.get(aid), hr['rating'], ar['rating'])
+            # A pooled FCS side is rated as the division, not as itself, so it
+            # has no roster of its own to measure; the FBS side still is.
+            home_talent, away_talent = talent.lookup(roster, e['home']), talent.lookup(roster, e['away'])
+            talent_shift = talent.margin_shift(talent_fit, home_talent if home_model == hid else None,
+                                               away_talent if away_model == aid else None, hr['rating'], ar['rating'],
+                                               season_games.get(hid, 0), season_games.get(aid, 0))
+            total_shift = margin_shift+off_shift+talent_shift
             entry.update(home_spending=home_spend, away_spending=away_spend,
-                         spend_margin_shift=margin_shift, spend_measure=spend_measure)
+                         spend_margin_shift=margin_shift, spend_measure=spend_measure,
+                         home_penalties=off_rates.get(hid), away_penalties=off_rates.get(aid),
+                         officiating_margin_shift=off_shift,
+                         home_talent=home_talent, away_talent=away_talent, talent_margin_shift=talent_shift)
             hp, ap = model.predict({'home_team': home_model, 'away_team': away_model, 'neutral': bool(e.get('neutral')),
-                                     'home_adjustment': margin_shift/2, 'away_adjustment': -margin_shift/2})
+                                     'home_adjustment': total_shift/2, 'away_adjustment': -total_shift/2})
             fair_home_spread = round(ap-hp, 2)
             lean = power_lean(fair_home_spread, entry['home_notes'], entry['away_notes'])
             entry.update(home_points=round(hp, 1), away_points=round(ap, 1), fair_home_spread=fair_home_spread,
@@ -468,8 +493,19 @@ def build(payload, as_of, spend=None):
             edge = entry.get('lean_edge_points')
             entry['sample_games'] = sample
             entry['lean_side'] = None if edge is None or abs(edge) < 1 else ('Home' if edge > 0 else 'Away')
-            entry['confidence'] = ('Unavailable' if edge is None else 'Low' if sample < 4 or abs(edge) < 3 else 'Moderate')
+            if edge is None:
+                entry['confidence'] = 'Unavailable'
+            elif sample < 2 or abs(edge) < 2:
+                entry['confidence'] = 'Low'
+            elif sample < 5 or abs(edge) < 4:
+                entry['confidence'] = 'Moderate'
+            else:
+                entry['confidence'] = 'High'
             entry['confidence_detail'] = f'{sample} current-season completed games for the less-observed team. Qualitative confidence; not a calibrated cover probability.'
+            if e.get('completed') and e.get('home_score') is not None and e.get('away_score') is not None and entry['lean_side'] and e.get('home_spread') is not None:
+                cover_margin = (e['home_score'] - e['away_score']) + e['home_spread']
+                entry['lean_result'] = ('Push' if cover_margin == 0
+                                         else 'Win' if (cover_margin > 0) == (entry['lean_side'] == 'Home') else 'Loss')
         games[e['id']] = entry
     fit_count = len(completed_rows)
     thin = sum(1 for r in top_ratings if r['games'] < MIN_GAMES)
@@ -486,10 +522,23 @@ def build(payload, as_of, spend=None):
         status += (f" A roster-cost prior nudges the projected margin while a team has under {nil.FADE_GAMES} games this season "
                    f"(fitted this refresh at {roster_fit['points_per_doubling']} pts per doubling of payroll, R² {roster_fit['r_squared']}); it fades to zero after that "
                    'and is skipped unless both schools report a roster cost. Athletic department budgets are listed for reference and never move a spread.')
+    if off_fit:
+        status += (f" A penalty-tendency prior (fitted this refresh at {off_fit['slope']} pts of margin per penalty of net differential, "
+                   f"R² {off_fit['r_squared']} across {off_fit['teams']} teams) nudges the margin toward whichever FBS side has drawn more calls than it has committed; "
+                   f"weight grows with each team's penalty sample, reaching full weight at {officiating.FULL_SAMPLE_GAMES} games. No referee is identified anywhere in this data -- "
+                   'no free source ties a specific official to a specific NCAA football game -- so this tracks each team\'s own penalty history instead.')
+    if talent_fit:
+        status += (f" A roster-talent prior from 247Sports' Team Talent Composite (fitted this refresh at {talent_fit['slope']} rating pts per point of "
+                   f"average player rating, R² {talent_fit['r_squared']} across {talent_fit['teams']} teams) pulls each FBS team "
+                   f"{round(talent.MAX_WEIGHT*100)}% of the way toward the rating its roster implies before it has played, fading to zero at {talent.FADE_GAMES} games this season.")
     return {'as_of': as_of.isoformat(), 'min_games': MIN_GAMES, 'status': status, 'ratings': top_ratings, 'team_ratings': team_ratings, 'ranking_population':len(peers), 'ranking_scope':scope, 'games': games,
             'trend_since': prior['label'] if prior else None, 'history_weeks_tracked': len(history),
             'spend_fit': spend_fits, 'spend_board': nil.leaderboard(spend) if spend else None,
             'spend_labels': (spend or {}).get('labels'),
             'spend_source': (spend or {}).get('source'), 'spend_fetched_at': (spend or {}).get('fetched_at'),
             'spend_fade_games': nil.FADE_GAMES,
-            'fcs_pooled': None if not fcs else {'rating': fcs['rating'], 'games': fcs['games']}}
+            'officiating_fit': off_fit, 'officiating_full_sample_games': officiating.FULL_SAMPLE_GAMES,
+            'fcs_pooled': None if not fcs else {'rating': fcs['rating'], 'games': fcs['games']},
+            'talent_fit': talent_fit, 'talent_board': talent.leaderboard(roster) if roster else None,
+            'talent_source': (roster or {}).get('source'), 'talent_fetched_at': (roster or {}).get('fetched_at'),
+            'talent_fade_games': talent.FADE_GAMES, 'talent_max_weight': talent.MAX_WEIGHT}

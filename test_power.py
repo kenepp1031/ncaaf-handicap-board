@@ -1,6 +1,7 @@
 import unittest
 from datetime import date
 import power
+import talent
 
 
 def played(id, day, home, away, hs, as_, spread=-3, total=45, completed=True, home_combined=None, away_combined=None, weather=None):
@@ -318,6 +319,41 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(projections[0]['lean_home_spread'],projections[1]['lean_home_spread'])
         self.assertEqual([p['lean_side'] for p in projections],['Away','Home'])
         self.assertEqual(projections[0]['confidence'],'Low')
+
+    def test_completed_game_keeps_its_lean_and_is_graded(self):
+        # g6 finishes after P and Q already have history, so it should still
+        # carry a lean (not disappear once final) and be marked right/wrong.
+        prior = [played('p1',1,'P','R',35,10), played('p2',2,'P','S',30,7),
+                 played('q1',1,'Q','R',10,35), played('q2',2,'Q','S',7,30)]
+        final = played('g6',3,'P','Q',31,10,spread=-3)
+        result = power.build({'events': prior+[final], 'top50': []}, date(2026, 9, 5))
+        game = result['games']['g6']
+        self.assertIn('lean_home_spread', game)
+        self.assertIsNotNone(game['lean_side'])
+        self.assertIn(game['lean_result'], ('Win', 'Loss', 'Push'))
+        # P won by 21 against a -3 market spread, so a Home lean must grade Win.
+        if game['lean_side'] == 'Home':
+            self.assertEqual(game['lean_result'], 'Win')
+
+    def test_roster_talent_nudges_the_margin_toward_the_deeper_roster(self):
+        # P and Q have identical results, so only their rosters can split them.
+        prior = [played('p',1,'P','R',28,21), played('q',1,'Q','S',28,21), dict(played('rs',2,'R','S',21,21), neutral=True)]
+        payload = {'events': prior+[played('g',8,'P','Q',0,0,completed=False)], 'top50': [{'id': 'Q', 'rank': 1}]}
+        roster = {'schools': {talent.key('Team '+t): {'team': 'Team '+t, 'rank': rank, 'avg_rating': avg}
+                              for t, rank, avg in (('Q',1,92.0),('P',2,86.0),('R',3,80.0),('S',4,80.0))}}
+        original, talent.MIN_FIT_TEAMS = talent.MIN_FIT_TEAMS, 3
+        try:
+            plain = power.build(payload, date(2026,9,5))
+            nudged = power.build(payload, date(2026,9,5), roster=roster)
+        finally:
+            talent.MIN_FIT_TEAMS = original
+        game = nudged['games']['g']
+        self.assertLess(game['talent_margin_shift'], 0)
+        self.assertAlmostEqual(game['fair_home_spread']-plain['games']['g']['fair_home_spread'], -game['talent_margin_shift'], places=1)
+        self.assertEqual(game['away_talent']['avg_rating'], 92.0)
+        self.assertEqual(nudged['ratings'][0]['talent']['rank'], 1)
+        self.assertIsNone(plain['talent_fit'])
+        self.assertEqual(plain['games']['g']['talent_margin_shift'], 0.0)
 
     def test_freezing_precipitation_and_indoor_suppression(self):
         e={'weather':{'weather_code':66,'wind_speed_10m':0}}

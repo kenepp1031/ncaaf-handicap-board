@@ -52,11 +52,11 @@ function setFilter(f){betsOnly=(f==='bets');document.querySelectorAll('.filterta
 document.querySelectorAll('.filtertab').forEach(b=>b.onclick=()=>setFilter(b.dataset.filter));
 async function toggleFavorite(id,on){try{await api('favorite',{id,favorite:!on});await load()}catch(e){notice(e.message)}}
 function summaryText(rows){let counts={Win:0,Loss:0,Push:0,Pending:0},net=0,risk=0;for(let p of rows){counts[p.result]++;net+=p.profit_units;if(p.result!=='Pending')risk+=p.stake}let decisions=counts.Win+counts.Loss;let pct=decisions?(100*counts.Win/decisions).toFixed(1)+'%':'—';let roi=risk?(100*net/risk).toFixed(1)+'%':'—';return `${counts.Win} W / ${counts.Loss} L / ${counts.Push} Push • ${counts.Pending} pending • Win rate ${pct} • Net ${net>=0?'+':''}${net.toFixed(2)} units • ROI ${roi}`}
-function weatherText(e){let w=e.weather;if(e.venue?.indoor)return '<span class="weather">Indoor venue · field conditions sheltered</span>';if(!w?.forecast)return `<span class="weather">${esc(e.weather_status||'Game forecast unavailable')}</span>`;let age=(Date.now()-new Date(w.fetched_at))/3600000;return `<span class="weather">${age>2?'Stale forecast · ':''}Game forecast: <b>${Math.round(w.temperature_2m)}°F</b><br>Wind up to ${Math.round(w.wind_speed_10m??0)} mph · gusts ${Math.round(w.wind_gusts_10m??0)} mph<br><small>${esc(w.location)} · kickoff + 3 hours · updated ${esc(new Date(w.fetched_at).toLocaleString())}</small></span>`}
+function weatherText(e){let w=e.weather;if(e.venue?.indoor)return '<span class="weather">Indoor venue · field conditions sheltered</span>';if(!w?.forecast)return `<span class="weather">${esc(e.weather_status||'Game forecast unavailable')}</span>`;let age=(Date.now()-new Date(w.fetched_at))/3600000;return `<span class="weather">${age>2?'Stale · ':''}<b>${Math.round(w.temperature_2m)}°F</b>, wind ${Math.round(w.wind_speed_10m??0)} mph<br><small>${esc(w.location)} · updated ${esc(new Date(w.fetched_at).toLocaleString())}</small></span>`}
 
 function teamTitle(e,side){let rank=e[side+'_combined'];return `<div class="team-title">${e[side+'_logo']?`<img src="${esc(e[side+'_logo'])}" alt="" loading="lazy">`:''}<div><div class="team-sub">${side==='home'?(e.neutral?'DESIGNATED HOME · NEUTRAL SITE':'HOME'):'AWAY'}${e[side+'_record']?' · '+esc(e[side+'_record']):''}</div><h3>${rank?`<span class="rank" title="Combined CBS / AP / Coaches poll">Poll #${rank}</span> `:''}${esc(e[side])}</h3></div></div>`}
 function powerGame(e){return (state.data.power&&state.data.power.games)?state.data.power.games[e.id]:null}
-function atsText(a){if(a&&a.wins+a.losses+a.pushes===0){const since=state.data.lines_captured_since;return since?`ATS: capturing lines since ${new Date(since).toLocaleDateString()}`:'ATS history unavailable'}return a?`${a.wins}-${a.losses}-${a.pushes} ATS`:''}
+function atsText(a){if(!a||a.wins+a.losses+a.pushes===0)return '';return `${a.wins}-${a.losses}-${a.pushes} ATS`}
 function previousGameBlock(e,side){
  const tid=e[side+'_id'],asOf=state.data.power?.as_of||state.today;
  const prior=(state.data.events||[]).filter(g=>g.completed&&g.home_score!=null&&g.away_score!=null&&g.game_date<e.game_date&&(!asOf||g.game_date<asOf)&&(g.home_id===tid||g.away_id===tid)).sort((a,b)=>b.game_date.localeCompare(a.game_date))[0];
@@ -72,7 +72,7 @@ const half=n=>n==null?'—':(Math.round(Number(n)*2)/2).toFixed(1);
 const spreadText=n=>n==null?'—':(Number(n)>0?'+':'')+half(n);
 function grades(e,side){let r=(state.data.power?.team_ratings||state.data.power?.ratings||[]).find(r=>r.id===e[side+'_id']);if(r?.ranked===false)return '<div class="grades">Outside FBS ranking pool<small>Not assigned an FBS rank or grade</small></div>';return `<div class="grades">Offense <b>${r?.offense_rank?'#'+r.offense_rank+' · '+r.offense_grade:'Unrated'}</b><br>Defense <b>${r?.defense_rank?'#'+r.defense_rank+' · '+r.defense_grade:'Unrated'}</b>${r?`<small>Out of ${r.ranking_population??state.data.power?.ranking_population??'—'} ${esc(r.ranking_scope||'FBS')} teams · ${r.games} games across recent seasons${r.games<4?' · provisional':''}</small>`:''}</div>`}
 
-function leanLine(e){let p=powerGame(e);let side=p?.lean_side?.toLowerCase();return `<div class="model-lean">Our lean: <b>${side?esc(e[side])+' '+spreadText(e[side+'_spread']):'No lean'}</b><br><small>Confidence: ${esc(p?.confidence||'Unavailable')}</small></div>`}
+function leanLine(e){let p=powerGame(e);let side=p?.lean_side?.toLowerCase();let mark=p?.lean_result==='Win'?' · ✓ RIGHT':p?.lean_result==='Loss'?' · ✗ WRONG':p?.lean_result==='Push'?' · PUSH':'';return `<div class="model-lean">Our lean: <b>${side?esc(e[side])+' '+spreadText(e[side+'_spread'])+mark:'No lean'}</b><br><small>Confidence: ${esc(p?.confidence||'Unavailable')}</small></div>`}
 function projectionComparison(e,p){
  const line=p?.lean_home_spread??p?.fair_home_spread;
  if(line==null)return '';
@@ -99,7 +99,7 @@ function modelDetail(e,p){
  const nudge=(p.fair_home_spread!=null&&p.lean_home_spread!=null)?p.fair_home_spread-p.lean_home_spread:null;
  if(nudge!=null&&Math.abs(nudge)>=0.5)rows.push(`<div>Situational adjustment: <b>${toward(nudge)}</b><small>Rest, letdown and lookahead notes shown beside each team.</small></div>`);
  const used=toward(p.lean_edge_points);
- if(used)rows.push(`<div>Edge behind the lean: <b>${used}</b><small>Needs 1.0 pt for any lean, 3.0 pts and four games each for Moderate.</small></div>`);
+ if(used)rows.push(`<div>Edge behind the lean: <b>${used}</b><small>Needs 1.0 pt for any lean; 2.0 pts and two games each for Moderate; 4.0 pts and five games each for High.</small></div>`);
  if(p.projected_total!=null){
   const gap=p.total_edge_points;
   const compared=gap==null?'no market total to compare':half(Math.abs(gap))+' pts '+(Number(gap)>=0?'above':'below')+' the market';
@@ -110,6 +110,12 @@ function modelDetail(e,p){
   const [field,label]=measure;
   const effect=p.spend_margin_shift?toward(p.spend_margin_shift):'no adjustment left — both teams have enough games this season';
   rows.push(`<div>Spending prior: <b>${effect}</b><small>${esc(label)}: ${esc(e.home)} ${money(p.home_spending?.[field])} · ${esc(e.away)} ${money(p.away_spending?.[field])}</small></div>`);
+ }
+ if(p.home_talent||p.away_talent){
+  const talentText=r=>r?`${Number(r.avg_rating).toFixed(2)} avg · #${r.rank}`:'not on the composite';
+  // Below a quarter point the half-point display would read "0.0 pts toward" a team.
+  const effect=Math.abs(p.talent_margin_shift||0)>=0.25?toward(p.talent_margin_shift):'under half a point';
+  rows.push(`<div>Roster talent prior: <b>${effect}</b><small>247Sports average player rating: ${esc(e.home)} ${talentText(p.home_talent)} · ${esc(e.away)} ${talentText(p.away_talent)}</small></div>`);
  }
  if(p.pooled_fcs?.length){
   const who=p.pooled_fcs.map(s=>esc(e[s])).join(' and ');
@@ -134,6 +140,16 @@ function renderSpending(){
  $('spendbody').innerHTML=board.map(r=>`<tr><td>${r.spend_rank}</td><td>${esc(r.school)}</td><td>${money(r.roster_cost)}</td><td>${money(r.athletic_expenses)}</td></tr>`).join('')
   ||'<tr><td colspan="4" class="empty">No spending figures available.</td></tr>';
 }
+function renderTalent(){
+ let power=state.data.power||{},board=power.talent_board||[],fit=power.talent_fit;
+ $('talentnote').textContent=board.length
+  ?`${board.length} rosters from 247Sports' Team Talent Composite, which rates every player on a roster by his recruiting grade. `
+   +(fit?`Average player rating explains ${Math.round(fit.r_squared*100)}% of the rating spread this refresh (${fit.slope} rating pts per point of average). It pulls each FBS team ${Math.round((power.talent_max_weight||0)*100)}% of the way toward what its roster implies before it has played, fading to zero at ${power.talent_fade_games} games this season.`
+        :'Not enough overlap with rated teams to fit a relationship, so roster talent is not affecting any projection.')
+  :'Roster talent has not been loaded yet.';
+ $('talentbody').innerHTML=board.map(r=>`<tr><td>${r.rank??'—'}</td><td>${esc(r.team)}</td><td>${r.points==null?'—':Number(r.points).toFixed(2)}</td><td>${r.avg_rating==null?'—':Number(r.avg_rating).toFixed(2)}</td><td>${r.five_star}</td><td>${r.four_star}</td><td>${r.three_star}</td><td>${r.players??'—'}</td></tr>`).join('')
+  ||'<tr><td colspan="8" class="empty">No roster talent figures available.</td></tr>';
+}
 function healthRow(label,value,note){return `<div class="health-row"><span>${esc(label)}</span><b>${value==null||value===''?'—':esc(value)}</b>${note?`<small>${esc(note)}</small>`:''}</div>`}
 function renderHealth(){
  let d=state.data||{},power=d.power||{};
@@ -155,6 +171,8 @@ function renderHealth(){
   healthRow('Poll snapshots archived',d.poll_history_weeks,'Only grows forward: ESPN publishes the current poll only.'),
   healthRow('Spending figures loaded',(power.spend_board||[]).length||null,power.spend_source?'From '+power.spend_source+(power.spend_fetched_at?', fetched '+new Date(power.spend_fetched_at).toLocaleDateString():''):'Not loaded.'),
   healthRow('Roster cost vs rating fit',fit?`${fit.points_per_doubling} pts per doubling · R² ${fit.r_squared} · ${fit.teams} schools`:null,fit?`Refitted every refresh. The prior fades to zero at ${power.spend_fade_games} games and is skipped unless both schools report a roster cost.`:'No fit — spending is not affecting any projection.'),
+  healthRow('Roster talent loaded',(power.talent_board||[]).length||null,power.talent_source?'From '+power.talent_source+(power.talent_fetched_at?', fetched '+new Date(power.talent_fetched_at).toLocaleDateString():''):'Not loaded.'),
+  healthRow('Roster talent vs rating fit',power.talent_fit?`${power.talent_fit.slope} pts per point of average rating · R² ${power.talent_fit.r_squared} · ${power.talent_fit.teams} schools`:null,power.talent_fit?`Refitted every refresh. The prior fades to zero at ${power.talent_fade_games} games this season.`:'No fit — roster talent is not affecting any projection.'),
   healthRow('Games shown this week',shown.length),
   healthRow('Shown games with no market spread',missing.length,missing.length?missing.map(e=>e.away+' at '+e.home).join(' · '):'Every shown game has a provider line.'),
  ].join('')+(warnings.length?`<div class="health-warnings"><b>Refresh warnings</b>${warnings.map(w=>`<div>${esc(w)}</div>`).join('')}</div>`:'');
@@ -165,14 +183,17 @@ function renderPower(){
  $('trendsince').textContent=power.trend_since||'this week';
  let pollTrend=state.data.poll_trend||{};
  let rows=(power.ratings||[]).slice().sort((a,b)=>a.power_rank-b.power_rank);
- $('powerbody').innerHTML=rows.map(t=>`<tr><td>${t.power_rank}</td><td>${esc(t.team)}</td><td class="${trendClass(t.trend)}">${trendText(t.trend)}</td><td>${half(t.rating)}</td><td>${t.offense_rank?'#'+t.offense_rank:'—'}${t.offense_grade?` (${t.offense_grade})`:''}</td><td>${t.defense_rank?'#'+t.defense_rank:'—'}${t.defense_grade?` (${t.defense_grade})`:''}</td><td>${t.games}</td><td>${t.ats?`${t.ats.wins}-${t.ats.losses}-${t.ats.pushes}`:'—'}</td><td>${t.ap_rank?'#'+t.ap_rank:'—'}</td><td>#${t.combined_rank}</td><td class="${trendClass(pollTrend[t.id])}">${trendText(pollTrend[t.id])}</td></tr>`).join('')||'<tr><td colspan="11" class="empty">No power ratings yet this season.</td></tr>';
- renderSpending();renderHealth();
+ $('powerbody').innerHTML=rows.map(t=>`<tr><td>${t.power_rank}</td><td>${esc(t.team)}</td><td class="${trendClass(t.trend)}">${trendText(t.trend)}</td><td>${half(t.rating)}</td><td>${t.offense_rank?'#'+t.offense_rank:'—'}${t.offense_grade?` (${t.offense_grade})`:''}</td><td>${t.defense_rank?'#'+t.defense_rank:'—'}${t.defense_grade?` (${t.defense_grade})`:''}</td><td>${t.talent?'#'+t.talent.rank:'—'}</td><td>${t.games}</td><td>${t.ats?`${t.ats.wins}-${t.ats.losses}-${t.ats.pushes}`:'—'}</td><td>${t.ap_rank?'#'+t.ap_rank:'—'}</td><td>#${t.combined_rank}</td><td class="${trendClass(pollTrend[t.id])}">${trendText(pollTrend[t.id])}</td></tr>`).join('')||'<tr><td colspan="12" class="empty">No power ratings yet this season.</td></tr>';
+ renderSpending();renderTalent();renderHealth();
 }
 async function quickPick(eventId,side){try{let e=state.data.events.find(e=>e.id===eventId);let existing=state.picks.find(p=>p.event_id===eventId);if(existing?.side===side){notice('This pick is already saved. Use Edit to change its line.');return}if(e.completed){notice('Game is final. Use Edit to record or correct a pick.');return}let key=side.toLowerCase();let spread=e[key+'_spread'];if(spread==null||e[key+'_odds']==null){choose(eventId,side);notice('Enter the missing spread or price to save this pick.');return}let body={game_date:e.game_date,home:e.home,away:e.away,side,spread,odds:e[key+'_odds'],stake:existing?existing.stake:1,home_score:'',away_score:'',notes:existing?existing.notes:'',event_id:eventId,favorite:existing?existing.favorite:0};if(existing)body.id=existing.id;await api('save',body);await load()}catch(err){notice(err.message)}}
 function marketLine(e){if(e.home_spread==null)return '<div class="nflspread">No market spread</div>';let side=e.home_spread<=0?'home':'away';return `<div class="nflspread">${esc(e[side])} ${spreadText(e[side+'_spread'])}</div>`}
 function matchupCard(e,printing=false){let p=state.picks.find(p=>p.event_id===e.id),address=e.venue?.address||{};let highlighted=printing&&$('highlightPicks')?.checked;
  let sideBlock=side=>`<div class="${side} ${highlighted&&p?.side.toLowerCase()===side?'picked-paper':''}">${teamTitle(e,side)}${grades(e,side)}${side==='home'?`<div class="stadium">${esc(e.venue?.fullName||'Venue unavailable')} · ${esc([address.city,address.state].filter(Boolean).join(', '))}</div>${weatherText(e)}`:''}${notesBlock(e,side)}</div>`;
- return `<article class="match">${weatherAlertBlock(e)}${sideBlock('home')}<div class="market"><div class="kickoff">${esc(new Date(e.kickoff).toLocaleString([],{weekday:'short',month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit'}))} · ${esc(e.status)}</div>${printing?marketLine(e):''}<div class="total">O/U ${half(e.total)}</div>${powerBlock(e)}${printing?'':modelDetail(e,powerGame(e))}${printing?'':`<div class="spread-pair">${['Home','Away'].map(side=>`<button class="quickpick ${p?.side===side?'chosen':''}" onclick="quickPick('${e.id}','${side}')" ${e.completed?'disabled':''}>${esc(e[side.toLowerCase()])}<br>${spreadText(e[side.toLowerCase()+'_spread'])}${p?.side===side?' · SAVED':''}</button>`).join('')}</div><div class="pick-actions"><button class="starbet ${p?.favorite?'on':''}" ${p?'':'disabled'} onclick="${p?`toggleFavorite(${p.id},${!!p.favorite})`:''}">${p?.favorite?'★ BET SAVED':'☆ BET'}</button><button onclick="${p?`edit(${p.id})`:`choose('${e.id}')`}">Edit</button></div>`}<div class="market-source">${esc(e.home_spread==null?(e.odds_status||'No odds supplied by provider'):e.market_source)}${e.market_observed_at?' · '+esc(new Date(e.market_observed_at).toLocaleDateString()):''}</div>${splitsBlock(e)}</div>${sideBlock('away')}</article>`}
+ let status=e.status&&e.status!=='Scheduled'?' · '+esc(e.status):'';
+ let pickClass=side=>{if(p?.side!==side)return '';if(p.result==='Win')return 'chosen pick-won';if(p.result==='Loss')return 'chosen pick-lost';return 'chosen'};
+ let pickMark=side=>{if(p?.side!==side)return '';if(p.result==='Win')return ' · ✓ WON';if(p.result==='Loss')return ' · ✗ LOST';if(p.result==='Push')return ' · PUSH';return ' · SAVED'};
+ return `<article class="match">${weatherAlertBlock(e)}${sideBlock('home')}<div class="market"><div class="kickoff">${esc(new Date(e.kickoff).toLocaleString([],{weekday:'short',month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit'}))}${status}</div>${printing?marketLine(e):''}<div class="total">O/U ${half(e.total)}</div>${powerBlock(e)}${printing?'':modelDetail(e,powerGame(e))}${printing?'':`<div class="spread-pair">${['Home','Away'].map(side=>`<button class="quickpick ${pickClass(side)}" onclick="quickPick('${e.id}','${side}')" ${e.completed?'disabled':''}>${esc(e[side.toLowerCase()])}<br>${spreadText(e[side.toLowerCase()+'_spread'])}${pickMark(side)}</button>`).join('')}</div><div class="pick-actions"><button class="starbet ${p?.favorite?'on':''}" ${p?'':'disabled'} onclick="${p?`toggleFavorite(${p.id},${!!p.favorite})`:''}">${p?.favorite?'★ BET SAVED':'☆ BET'}</button><button onclick="${p?`edit(${p.id})`:`choose('${e.id}')`}">Edit</button></div>`}<div class="market-source">${esc(e.home_spread==null?(e.odds_status||'No odds supplied by provider'):e.market_source)}${e.market_observed_at?' · '+esc(new Date(e.market_observed_at).toLocaleDateString()):''}</div>${splitsBlock(e)}</div>${sideBlock('away')}</article>`}
 function renderPrint(){
  $('printweek').textContent=activeTab?activeTab.label:'This week';
  let games=(state.data.events||[]).filter(inWeek).filter(e=>e.home_combined||e.away_combined);
@@ -213,6 +234,28 @@ function renderGames(games){
  box.replaceChildren(frag);
  box.scrollTop=scroll;
 }
+// Edge points scale from 1.0 (the minimum for any lean at all) to 4.0 (this
+// model's unreached High threshold). We map that onto a 1-10 display rating
+// so a Moderate-confidence game near the 2.0pt threshold reads as ~5/10 and
+// one near the top of the observed range reads closer to 10/10. It is a
+// relabeling of the existing edge, not a new signal.
+function confidenceRating(e){let edge=powerGame(e)?.lean_edge_points;if(edge==null)return null;return Math.max(1,Math.min(10,Math.round(edge*2.5)))}
+// "Moderate" (this model's ceiling label) needs 2+ games played by both
+// teams, which most of the slate won't have until well into the season — a
+// strict Moderate-only filter left this section empty most weeks. Instead we
+// rank every game in the week that has any lean at all (|edge| >= 1pt, the
+// model's own floor for issuing one) by edge size, and cap it at the top 5,
+// so "our best picks this week" always means the best of what's actually on
+// the board rather than an absolute bar the early season rarely clears.
+function renderTopPicks(games){
+ let card=$('toppicks-card'),box=$('toppicks');
+ let picks=games.filter(e=>!e.completed&&powerGame(e)?.lean_side)
+  .sort((a,b)=>Math.abs(powerGame(b).lean_edge_points||0)-Math.abs(powerGame(a).lean_edge_points||0))
+  .slice(0,5);
+ if(!picks.length){card.hidden=true;box.innerHTML='';return}
+ card.hidden=false;
+ box.innerHTML=picks.map(e=>`<div class="toppick"><div class="rating-badge">Confidence <b>${confidenceRating(e)}</b>/10</div>${matchupCard(e)}</div>`).join('');
+}
 function render(){
  let d=state.data||{},firstWeek=!activeTab;if(!activeTab&&(d.weeks||[]).length)setTab(currentTab());
  $('weektitle').textContent=(activeTab?activeTab.label+' · ':'')+(activeTab?.detail||(iso(week)+' — '+end()));$('matchtitle').textContent=(activeTab?activeTab.label:'This week')+' matchups';
@@ -222,6 +265,7 @@ function render(){
  $('roster').innerHTML=(d.top50||[]).map(t=>`<div><b class="rank">${t.rank}.</b> ${esc(t.team)}<br><small>CBS ${t.cbs||'—'} · AP ${t.ap||'—'} · Coaches ${t.coaches||'—'}</small></div>`).join('');
  let games=(d.events||[]).filter(inWeek).filter(e=>e.home_combined||e.away_combined);
  renderGames(games);
+ renderTopPicks(games);
  let allPicks=betsOnly?state.picks.filter(p=>p.favorite):state.picks;
  let picks=allPicks.filter(inWeek),w=picks.filter(p=>p.result==='Win').length,l=picks.filter(p=>p.result==='Loss').length,push=picks.filter(p=>p.result==='Push').length,pending=picks.filter(p=>p.result==='Pending').length,net=picks.reduce((s,p)=>s+p.profit_units,0);
  $('metrics').innerHTML=`<div class="metric"><strong>${w}–${l}–${push}</strong><small>Wins · losses · pushes</small></div><div class="metric"><strong>${pending}</strong><small>Pending picks</small></div><div class="metric"><strong>${w+l?(100*w/(w+l)).toFixed(1)+'%':'—'}</strong><small>ATS win rate (excludes pushes)</small></div><div class="metric"><strong>${net>=0?'+':''}${net.toFixed(2)}</strong><small>Net units</small></div>`;
