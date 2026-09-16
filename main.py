@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from db.db import init_db, connect
-from ingest import espn_scoreboard, rankings, dk_lines, weather as weather_ingest
+from ingest import espn_scoreboard, rankings, cbs_odds, dk_lines, weather as weather_ingest
 from ingest import nil_spending, talent as talent_ingest, officiating as officiating_ingest
 from ratings import power
 from backtest.log_results import log_season
@@ -71,13 +71,18 @@ def weekly_run(season: int, week: int, skip_scrape: bool = False) -> Path:
         today = date.today()
         week_start = today - timedelta(days=today.weekday())
         try:
-            espn_scoreboard.ingest(season, week_start, week_start + timedelta(days=6))
+            # Start a week back so an early-week run picks up last weekend's finals for the ratings fit.
+            espn_scoreboard.ingest(season, week_start - timedelta(days=7), week_start + timedelta(days=6))
         except Exception as e:
             print(f'  scoreboard refresh failed: {e}')
         try:
             rankings.ingest(season)
         except Exception as e:
             print(f'  rankings refresh failed: {e}')
+        try:
+            cbs_odds.ingest(season)
+        except Exception as e:
+            print(f'  CBS closing lines refresh failed: {e}')
         try:
             dk_lines.ingest()
         except Exception as e:

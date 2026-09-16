@@ -81,15 +81,15 @@ def ingest() -> dict:
         n_splits, n_lines = 0, 0
         today = date.today()
         for r in rows:
+            g = game_by_team_day.get((r['team'], r['month_day']))
             con.execute(
                 """INSERT INTO splits (game_id, team_key, month_day, spread, odds, handle_pct, bets_pct, captured_at)
                    VALUES (?,?,?,?,?,?,?,?)
                    ON CONFLICT(team_key, month_day) DO UPDATE SET
                        game_id=excluded.game_id, spread=excluded.spread, odds=excluded.odds,
                        handle_pct=excluded.handle_pct, bets_pct=excluded.bets_pct, captured_at=excluded.captured_at""",
-                (None, r['team'], r['month_day'], r['spread'], r['odds'], r['handle'], r['bets'], now))
+                (g['game_id'] if g else None, r['team'], r['month_day'], r['spread'], r['odds'], r['handle'], r['bets'], now))
             n_splits += 1
-            g = game_by_team_day.get((r['team'], r['month_day']))
             if not g:
                 continue
             d = date.fromisoformat(g['game_date'])

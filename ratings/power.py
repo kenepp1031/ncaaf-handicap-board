@@ -27,8 +27,9 @@ LOOKAHEAD_LEAN_POINTS = 1.0
 BYE_LEAN_POINTS = 1.0
 AP_BLEND_WEIGHT = 0.4
 
-GRADE_CUTOFFS = [(0.95, 'A+'), (0.85, 'A'), (0.75, 'A-'), (0.65, 'B+'), (0.55, 'B'), (0.45, 'B-'),
-                  (0.35, 'C+'), (0.25, 'C'), (0.15, 'C-'), (0.08, 'D')]
+# Percentile cutoffs centered so the median team is a C; A is the top ~15%, F the bottom ~12%.
+GRADE_CUTOFFS = [(0.95, 'A+'), (0.90, 'A'), (0.85, 'A-'), (0.78, 'B+'), (0.70, 'B'), (0.60, 'B-'),
+                  (0.50, 'C+'), (0.42, 'C'), (0.35, 'C-'), (0.28, 'D+'), (0.20, 'D'), (0.12, 'D-')]
 
 # See ingest/rankings.py's _FBS_ALIASES — same canonicalization, needed again
 # here because pooling keys off team *names*, not the poll ingest step.
@@ -433,6 +434,9 @@ def build(season: int, as_of: date, use_priors: bool = True) -> dict:
             _store_notes(con, e['game_id'], 'away', away_notes)
             if w:
                 con.execute('UPDATE weather SET alert_text=?, lean_note=? WHERE game_id=?', (wa, wn, e['game_id']))
+            # Keep the pre-kickoff projection for finished games so the backtest grades an honest forecast.
+            if e.get('completed') and con.execute('SELECT 1 FROM projections WHERE game_id=?', (e['game_id'],)).fetchone():
+                continue
             _store_projection(con, e['game_id'], proj)
         con.commit()
 

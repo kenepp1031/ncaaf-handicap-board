@@ -46,6 +46,8 @@ def parse_events(data: dict) -> list[dict]:
             row[side] = team.get('location', team['displayName'])
             row[side + '_id'] = str(team['id'])
             row[side + '_logo'] = team.get('logo', '')
+            row[side + '_color'] = team.get('color')
+            row[side + '_alt_color'] = team.get('alternateColor')
             row[side + '_record'] = next((r.get('summary', '') for r in c.get('records', []) if r.get('type') == 'total'), '')
             row[side + '_rank'] = c.get('curatedRank', {}).get('current', 99)
             row[side + '_score'] = int(c.get('score', 0)) if row['completed'] else None
@@ -70,12 +72,13 @@ def upsert_events(con, events: list[dict]) -> int:
     teams_seen = {}
     for r in events:
         for side in ('home', 'away'):
-            teams_seen[r[side + '_id']] = (r[side], r[side + '_logo'])
-    for tid, (name, logo) in teams_seen.items():
+            teams_seen[r[side + '_id']] = (r[side], r[side + '_logo'], r[side + '_color'], r[side + '_alt_color'])
+    for tid, (name, logo, color, alt) in teams_seen.items():
         con.execute(
-            """INSERT INTO teams (team_id, name, logo) VALUES (?,?,?)
-               ON CONFLICT(team_id) DO UPDATE SET name=excluded.name, logo=excluded.logo""",
-            (tid, name, logo))
+            """INSERT INTO teams (team_id, name, logo, color, alt_color) VALUES (?,?,?,?,?)
+               ON CONFLICT(team_id) DO UPDATE SET name=excluded.name, logo=excluded.logo,
+                   color=COALESCE(excluded.color, teams.color), alt_color=COALESCE(excluded.alt_color, teams.alt_color)""",
+            (tid, name, logo, color, alt))
     for r in events:
         con.execute(
             """INSERT INTO games (game_id, season, week, week_type, game_date, kickoff, status, completed,
@@ -128,7 +131,8 @@ def upsert_weeks(con, season: int, calendar: list) -> int:
 
 
 def _fetch_day(day: date) -> dict:
-    return fetch_json(ESPN + f"scoreboard?limit=1000&groups=80&dates={day.strftime('%Y%m%d')}")
+    # limit=1000 makes ESPN silently fall back to its 25-game default; 300 returns the full slate.
+    return fetch_json(ESPN + f"scoreboard?limit=300&groups=80&dates={day.strftime('%Y%m%d')}")
 
 
 def ingest(season: int, week_start: date | None = None, week_end: date | None = None, full_season: bool = False) -> dict:

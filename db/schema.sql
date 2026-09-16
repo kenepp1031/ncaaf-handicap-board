@@ -4,7 +4,9 @@ CREATE TABLE IF NOT EXISTS teams (
     team_id TEXT PRIMARY KEY,      -- ESPN numeric team id, as a string
     name TEXT,
     logo TEXT,
-    fbs INTEGER NOT NULL DEFAULT 0
+    fbs INTEGER NOT NULL DEFAULT 0,
+    color TEXT,                    -- ESPN primary hex, no '#'
+    alt_color TEXT
 );
 
 CREATE TABLE IF NOT EXISTS games (

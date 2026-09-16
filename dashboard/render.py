@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import sys
 from datetime import date, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from common import logo_url
+from common import logo_url, normal
 from db.db import connect
 
 OUT_PATH = Path(__file__).resolve().parent / "dashboard.html"
@@ -51,7 +52,13 @@ a{color:var(--tag)}
 .market{text-align:center}.kickoff{font-size:11px;color:var(--muted);margin-bottom:9px}
 .total{font-size:13px;font-weight:700;margin-bottom:9px;color:var(--total)}
 .market-source{font-size:10px;color:var(--muted2);margin-top:8px}
-.split{font-size:11px;margin-top:8px;color:var(--muted2);line-height:1.6}
+.split{margin-top:10px;text-align:left}
+.split-label{font-size:9px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--muted2);text-align:center;margin-bottom:4px}
+.split-row{display:grid;grid-template-columns:34px 1fr 34px;gap:6px;align-items:center;margin-top:5px;font-size:11px;position:relative}
+.split-row b{color:var(--ink)}.split-row .r{text-align:right}
+.split-row span{grid-column:2;font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted2);text-align:center;margin-top:1px}
+.split-bar{display:flex;gap:2px;height:8px;border-radius:4px;overflow:hidden;background:var(--row-border)}
+.split-bar i{display:block;height:100%;border-radius:4px}
 .match-list{max-height:900px;overflow:auto}
 .roster{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:15px}
 .roster div{padding:8px;border-bottom:1px solid var(--row-border);font-size:13px}
@@ -69,9 +76,11 @@ details summary{cursor:pointer;font-weight:600}
 .health-row span{color:var(--muted)}.health-row b{color:var(--ink);text-align:right}
 .health-row small{grid-column:1/-1;color:var(--muted2);font-size:10px;line-height:1.6}
 .weather-alert{grid-column:1/-1;background:var(--loss);color:#fff;font-weight:700;font-size:13px;padding:9px 14px;border-radius:6px;margin-bottom:14px}
-.toppick{position:relative}.toppick .match{border-radius:8px;border:1px solid var(--accent)}
-.rating-badge{position:absolute;top:10px;left:10px;z-index:2;background:var(--accent);color:#fff;font-size:12px;font-weight:700;padding:5px 10px;border-radius:20px}
-.rating-badge b{font-size:15px}
+.tier-low{--tier:var(--muted)}.tier-moderate{--tier:var(--accent)}.tier-high{--tier:var(--win)}
+.conf{display:inline-block;margin-top:4px;color:var(--tier);font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;padding:2px 8px;border:1px solid var(--tier);border-radius:4px;opacity:.85}
+.conf b{font-size:12px}
+.toppick .match{border-left:3px solid var(--muted2);padding-left:24px}
+.toppick:has(.tier-moderate) .match{border-left-color:var(--accent)}.toppick:has(.tier-high) .match{border-left-color:var(--win)}
 .previous-game{margin-top:10px;padding-top:6px;border-top:1px dashed var(--border);font-size:11px;line-height:1.6;color:var(--muted)}
 .previous-game small{display:block;font-size:9px;font-weight:700;letter-spacing:.5px}
 .grades{font-size:13px;line-height:1.7;margin:10px 0}.grades b{color:var(--tag)}.grades small{display:block;color:var(--muted);font-size:10px}
@@ -133,7 +142,7 @@ def team_title(g, side, notes_by_side):
     return f'<div class="team-title">{img}<div><div class="team-sub">{esc(sub)}</div><h3>{rank_html}{esc(name)}</h3></div></div>'
 
 
-def grades_block(rating_row):
+def grades_block(rating_row, season_games=0):
     if rating_row is None:
         return '<div class="grades">Outside FBS ranking pool<small>Not assigned an FBS rank or grade</small></div>'
     off = f"#{rating_row['offense_rank']} · {rating_row['offense_grade']}" if rating_row['offense_rank'] else 'Unrated'
@@ -141,9 +150,10 @@ def grades_block(rating_row):
     pop = rating_row['ranking_population'] or '—'
     scope = rating_row['ranking_scope'] or 'FBS'
     games = rating_row['games'] or 0
-    provisional = ' · provisional' if games < 4 else ''
+    basis = f'{season_games} games this season · {games} in the fit'
+    provisional = ' · mostly last season' if season_games < 4 else ''
     return (f'<div class="grades">Offense <b>{off}</b><br>Defense <b>{dfn}</b>'
-            f'<small>Out of {pop} {esc(scope)} teams · {games} games across recent seasons{provisional}</small></div>')
+            f'<small>Out of {pop} {esc(scope)} teams · {basis}{provisional}</small></div>')
 
 
 def ats_text(record):
@@ -227,16 +237,85 @@ def lean_line(proj):
         text = esc(proj[f'{side}_name']) + ' ' + spread_text(proj.get(f'{side}_spread'))
     else:
         text = 'No lean'
-    confidence = esc(proj['confidence']) if proj and proj.get('confidence') else 'Unavailable'
-    return f'<div class="model-lean">Our lean: <b>{text}</b><br><small>Confidence: {confidence}</small></div>'
+    tier = proj.get('confidence') if proj else None
+    rating = confidence_rating(proj) if proj and side else None
+    if rating is None:
+        confidence = f'<small>Confidence: {esc(tier or "Unavailable")}</small>'
+    else:
+        confidence = f'<small class="conf tier-{tier.lower()}">{esc(tier)} · <b>{rating}</b>/10</small>'
+    return f'<div class="model-lean">Our lean: <b>{text}</b><br>{confidence}</div>'
 
 
-def matchup_card(g, home_notes, away_notes, home_ats, away_ats, home_rating, away_rating, w, proj):
+def split_block(g, splits):
+    if not splits:
+        return ''
+    by_team = {s['team_key']: s for s in splits}
+    home = by_team.get(normal(g['home_name']))
+    away = by_team.get(normal(g['away_name']))
+    if not home or not away:
+        return ''
+    hc, ac = split_colors(g)
+    def row(label, key):
+        h = round(home[key])
+        a = round(away[key])
+        return (f'<div class="split-row"><b>{h}%</b><div class="split-bar">'
+                f'<i style="width:{h}%;background:{hc}"></i><i style="width:{a}%;background:{ac}"></i></div>'
+                f'<b class="r">{a}%</b><span>{label}</span></div>')
+    return (f'<div class="split"><div class="split-label">DraftKings splits · {esc(g["home_name"])} vs {esc(g["away_name"])}</div>'
+            f'{row("Handle", "handle_pct")}{row("Bets", "bets_pct")}</div>')
+
+
+def _rgb(hex6):
+    hex6 = (hex6 or '').strip().lstrip('#')
+    if not re.fullmatch(r'[0-9a-fA-F]{6}', hex6):
+        return None
+    return tuple(int(hex6[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def _luma(rgb):
+    return 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
+
+
+def _visible(rgb):
+    # Dark primaries (navy, maroon) vanish against the panel; lift them toward white but keep the hue.
+    if rgb is None:
+        return None
+    while _luma(rgb) < 55:
+        rgb = tuple(round(v + (255 - v) * 0.18) for v in rgb)
+    return rgb
+
+
+def _distance(a, b):
+    return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+
+def _saturated(rgb):
+    return max(rgb) - min(rgb) >= 50
+
+
+def split_colors(g):
+    fallbacks = [(47, 142, 255), (255, 92, 102), (53, 212, 136)]
+    home_opts = [c for c in map(_visible, (_rgb(g['home_color']), _rgb(g['home_alt']))) if c]
+    away_opts = [c for c in map(_visible, (_rgb(g['away_color']), _rgb(g['away_alt']))) if c]
+    pairs = [(h, a, hi + ai) for hi, h in enumerate(home_opts + fallbacks) for ai, a in enumerate(away_opts + fallbacks)
+             if _distance(h, a) >= 90]
+    # Saturated beats white/grey alternates, team colors beat fallbacks, then the widest separation.
+    best = max(pairs, key=lambda p: (_saturated(p[0]) + _saturated(p[1]),
+                                     -(p[0] in fallbacks) - (p[1] in fallbacks), -p[2], _distance(p[0], p[1])))
+    return _css(best[0]), _css(best[1])
+
+
+def _css(rgb):
+    return '#%02x%02x%02x' % rgb
+
+
+def matchup_card(g, home_notes, away_notes, home_ats, away_ats, home_rating, away_rating, w, proj, splits=None, season_games=None):
+    season_games = season_games or {}
     weather_block = weather_alert_block(w)
-    home_side = (f'<div class="home">{team_title(g, "home", None)}{grades_block(home_rating)}'
+    home_side = (f'<div class="home">{team_title(g, "home", None)}{grades_block(home_rating, season_games.get(g["home_id"], 0))}'
                  f'<div class="stadium">{esc(g["venue_name"] or "Venue unavailable")}</div>{weather_text(w, g["indoor"])}'
                  f'{notes_block(home_notes, ats_text(home_ats))}</div>')
-    away_side = (f'<div class="away">{team_title(g, "away", None)}{grades_block(away_rating)}'
+    away_side = (f'<div class="away">{team_title(g, "away", None)}{grades_block(away_rating, season_games.get(g["away_id"], 0))}'
                  f'{notes_block(away_notes, ats_text(away_ats))}</div>')
     status = f' · {esc(g["status"])}' if g['status'] and g['status'] != 'Scheduled' else ''
     kickoff = g['kickoff']
@@ -262,21 +341,29 @@ def matchup_card(g, home_notes, away_notes, home_ats, away_ats, home_rating, awa
     market_source = esc(g['odds_status'] if g['home_spread'] is None else g['market_source'])
     market = (f'<div class="market"><div class="kickoff">{esc(kickoff_label)}{status}</div>'
               f'<div class="total">O/U {half(g["total"])}</div>{lean}{projection_html}{detail}'
-              f'<div class="market-source">{market_source}</div></div>')
+              f'{split_block(g, splits)}<div class="market-source">{market_source}</div></div>')
     return f'<article class="match">{weather_block}{home_side}{market}{away_side}</article>'
+
+
+# tier -> (low score, high score, edge at low score, edge at high score)
+CONFIDENCE_BANDS = {'Low': (1, 3, 1.0, 2.0), 'Moderate': (4, 6, 2.0, 6.0), 'High': (7, 10, 4.0, 10.0)}
 
 
 def confidence_rating(proj):
     edge = proj['lean_edge_points'] if proj else None
     if edge is None:
         return None
-    return max(1, min(10, round(edge * 2.5)))
+    # Edge is signed (negative = away lean); the tier label already folds in sample size, so score within its band.
+    lo, hi, e_lo, e_hi = CONFIDENCE_BANDS.get(proj.get('confidence'), CONFIDENCE_BANDS['Low'])
+    frac = (abs(edge) - e_lo) / (e_hi - e_lo)
+    return max(lo, min(hi, int(lo + (hi - lo) * frac + 0.5)))
 
 
 def render_week(season: int, week: int) -> Path:
     with connect() as con:
         games = con.execute(
-            """SELECT g.*, th.name AS home_name, th.logo AS home_logo, ta.name AS away_name, ta.logo AS away_logo
+            """SELECT g.*, th.name AS home_name, th.logo AS home_logo, th.color AS home_color, th.alt_color AS home_alt,
+                      ta.name AS away_name, ta.logo AS away_logo, ta.color AS away_color, ta.alt_color AS away_alt
                FROM games g JOIN teams th ON th.team_id=g.home_id JOIN teams ta ON ta.team_id=g.away_id
                WHERE g.season=? AND g.week=? ORDER BY g.kickoff""", (season, week)).fetchall()
         games = [dict(g) for g in games]
@@ -295,7 +382,8 @@ def render_week(season: int, week: int) -> Path:
         power_rows = []
         if as_of:
             power_rows = [dict(r) for r in con.execute(
-                'SELECT * FROM team_ratings WHERE season=? AND as_of_date=? ORDER BY power_rank', (season, as_of)).fetchall()]
+                'SELECT * FROM team_ratings WHERE season=? AND as_of_date=? AND power_rank IS NOT NULL ORDER BY power_rank',
+                (season, as_of)).fetchall()]
             for r in power_rows:
                 ratings_by_team[r['team_id']] = r
         team_names = {r['team_id']: r['name'] for r in con.execute('SELECT team_id, name FROM teams')}
@@ -306,6 +394,13 @@ def render_week(season: int, week: int) -> Path:
 
         weather_by_game = {r['game_id']: dict(r) for r in con.execute('SELECT * FROM weather')}
         proj_by_game = {r['game_id']: dict(r) for r in con.execute('SELECT * FROM projections')}
+        splits_by_game = {}
+        for r in con.execute('SELECT * FROM splits WHERE game_id IS NOT NULL'):
+            splits_by_game.setdefault(r['game_id'], []).append(dict(r))
+        season_games = {}
+        for r in con.execute('SELECT home_id, away_id FROM games WHERE season=? AND completed=1', (season,)):
+            for tid in (r['home_id'], r['away_id']):
+                season_games[tid] = season_games.get(tid, 0) + 1
 
         status_row = con.execute('SELECT MAX(as_of_date) FROM team_ratings').fetchone()
 
@@ -321,20 +416,19 @@ def render_week(season: int, week: int) -> Path:
         # ATS-record pills (e.g. "6-2-0 ATS") are omitted here: ratings/power.py
         # doesn't currently persist per-game ATS records to a queryable table.
         cards.append((g, home_notes, away_notes, None, None, ratings_by_team.get(g['home_id']),
-                      ratings_by_team.get(g['away_id']), w, proj))
+                      ratings_by_team.get(g['away_id']), w, proj, splits_by_game.get(g['game_id']), season_games))
 
     top_picks = sorted(
-        [(c[0], c[-1]) for c in cards if c[-1] and not c[0]['completed'] and c[-1].get('lean_side')],
-        key=lambda gp: abs(gp[1].get('lean_edge_points') or 0), reverse=True)[:5]
+        [(c[0], c[8]) for c in cards if c[8] and not c[0]['completed'] and c[8].get('lean_side')],
+        key=lambda gp: (confidence_rating(gp[1]) or 0, abs(gp[1].get('lean_edge_points') or 0)), reverse=True)[:5]
 
-    games_html = ''.join(matchup_card(*c[:9]) for c in cards) or '<div class="empty">No Top 50 matchups this week.</div>'
+    games_html = ''.join(matchup_card(*c) for c in cards) or '<div class="empty">No Top 50 matchups this week.</div>'
     top_picks_html = ''
     if top_picks:
         blocks = []
         for g, p in top_picks:
             c = next(c for c in cards if c[0]['game_id'] == g['game_id'])
-            rating = confidence_rating(p)
-            blocks.append(f'<div class="toppick"><div class="rating-badge">Confidence <b>{rating}</b>/10</div>{matchup_card(*c[:9])}</div>')
+            blocks.append(f'<div class="toppick">{matchup_card(*c)}</div>')
         top_picks_html = '<div class="card"><h2>Top Picks This Week</h2>' + ''.join(blocks) + '</div>'
 
     power_html = _render_power_table(power_rows, team_names)

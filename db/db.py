@@ -17,3 +17,7 @@ def connect():
 def init_db():
     with connect() as con:
         con.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+        existing = {r["name"] for r in con.execute("PRAGMA table_info(teams)")}
+        for col in ("color", "alt_color"):
+            if col not in existing:
+                con.execute(f"ALTER TABLE teams ADD COLUMN {col} TEXT")

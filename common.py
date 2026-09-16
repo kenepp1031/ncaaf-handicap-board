@@ -57,7 +57,8 @@ _ALIASES = {
     'mississippi': 'olemiss', 'southerncalifornia': 'usc', 'pittsburgh': 'pitt',
     'appstate': 'appalachianstate', 'wkentucky': 'westernkentucky', 'nillinois': 'northernillinois',
     'samhoustonstate': 'samhouston', 'connecticut': 'uconn', 'massachusetts': 'umass',
-    'sanjsest': 'sanjosestate', 'sanjosest': 'sanjosestate', 'arizonast': 'arizonastate', 'boisest': 'boisestate',
+    'sanjsest': 'sanjosestate', 'sanjosest': 'sanjosestate', 'sanjosstate': 'sanjosestate',
+    'arizonast': 'arizonastate', 'boisest': 'boisestate',
 }
 
 

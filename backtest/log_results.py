@@ -4,6 +4,7 @@ Sport-generic logic, adapted from NFL 2.0's backtest/log_results.py.
 from __future__ import annotations
 
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -49,12 +50,15 @@ def _ou_result(predicted_total, closing_total, home_score, away_score):
 def log_season(season: int) -> int:
     with connect() as con:
         games = con.execute(
-            """SELECT g.game_id, g.season, g.week, g.home_score, g.away_score,
-                      p.fair_home_spread, p.projected_total, p.confidence
+            """SELECT g.game_id, g.season, g.week, g.home_score, g.away_score, g.kickoff,
+                      p.fair_home_spread, p.projected_total, p.confidence, p.generated_at
                FROM games g JOIN projections p ON p.game_id = g.game_id
                WHERE g.season=? AND g.completed=1""", (season,)).fetchall()
         n = 0
         for g in games:
+            # Only grade forecasts made before kickoff; anything later was fit on the result.
+            if not g['generated_at'] or datetime.fromisoformat(g['generated_at']) >= datetime.fromisoformat(g['kickoff']):
+                continue
             closing_spread, closing_total = _closing_spread(con, g['game_id'])
             error_spread = None if closing_spread is None or g['fair_home_spread'] is None else round(
                 (g['home_score'] - g['away_score']) - (-g['fair_home_spread']), 2)
