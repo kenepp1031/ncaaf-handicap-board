@@ -338,7 +338,25 @@ def build(season: int, as_of: date, use_priors: bool = True) -> dict:
             r['ranking_scope'] = scope
             r['ranking_population'] = len(peers)
 
-        _store_team_ratings(con, season, as_of, top_ratings)
+        # Every FBS-rated team gets an offense/defense grade for its matchup
+        # cards, not just the combined Top 50 (that's the Power Ranking table's
+        # own scope). Without this, any game involving a team outside the
+        # Top 50 wrongly shows "Outside FBS ranking pool" even though the
+        # model rates it -- see the ratings/power.py-vs-original-power.py note.
+        top_ids = {r['id'] for r in top_ratings}
+        extra_rows = []
+        for tid in peer_ids - top_ids:
+            r = ratings[tid]
+            extra_rows.append({'id': tid, 'team': names.get(tid, tid), 'combined_rank': None, 'ap_rank': ap_ranks.get(tid),
+                                'rating': r['rating'], 'offense': r['offense'], 'defense': r['defense'], 'games': r['games'],
+                                'offense_rank': 1 + sum(t['offense'] > r['offense'] for t in peers),
+                                'defense_rank': 1 + sum(t['defense'] > r['defense'] for t in peers),
+                                'offense_grade': letter_grade(r['offense'], offense_pool),
+                                'defense_grade': letter_grade(r['defense'], defense_pool),
+                                'blended_rating': None, 'power_rank': None, 'trend': None,
+                                'ranking_scope': scope, 'ranking_population': len(peers)})
+
+        _store_team_ratings(con, season, as_of, top_ratings + extra_rows)
 
         # Per-game projections + notes (_store_notes clears each side's prior rows first).
         for e in events:

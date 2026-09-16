@@ -74,8 +74,18 @@ def fetch_season(season: int, get=_get) -> dict:
     return schools
 
 
-def ingest(season: int, get=_get) -> dict:
+MAX_AGE_DAYS = 7
+
+
+def ingest(season: int, get=_get, force: bool = False) -> dict:
     now = datetime.now().astimezone().isoformat(timespec='seconds')
+    if not force:
+        with connect() as con:
+            row = con.execute('SELECT MAX(captured_at) AS d FROM talent WHERE season=?', (season,)).fetchone()
+        if row and row['d']:
+            age_days = (datetime.now().astimezone() - datetime.fromisoformat(row['d'])).days
+            if age_days < MAX_AGE_DAYS:
+                return {'skipped': f'cached copy is {age_days} day(s) old'}
     schools = fetch_season(season, get)
     with connect() as con:
         for k, row in schools.items():

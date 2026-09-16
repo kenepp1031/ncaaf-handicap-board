@@ -76,8 +76,18 @@ def parse(page: str) -> dict:
     return {'roster': roster, 'expenses': expenses, 'names': names}
 
 
-def ingest(season: int) -> dict:
+MAX_AGE_DAYS = 7
+
+
+def ingest(season: int, force: bool = False) -> dict:
     now = datetime.now().astimezone().isoformat(timespec='seconds')
+    if not force:
+        with connect() as con:
+            row = con.execute('SELECT MAX(captured_at) AS d FROM nil_spend WHERE season=?', (season,)).fetchone()
+        if row and row['d']:
+            age_days = (datetime.now().astimezone() - datetime.fromisoformat(row['d'])).days
+            if age_days < MAX_AGE_DAYS:
+                return {'skipped': f'cached copy is {age_days} day(s) old'}
     request = urllib.request.Request(SOURCE, headers=AGENT)
     with urllib.request.urlopen(request, timeout=45) as response:
         page = response.read().decode('utf-8', 'replace')
