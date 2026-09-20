@@ -21,3 +21,10 @@ def init_db():
         for col in ("color", "alt_color"):
             if col not in existing:
                 con.execute(f"ALTER TABLE teams ADD COLUMN {col} TEXT")
+        # CREATE TABLE IF NOT EXISTS won't widen a table that already exists, so
+        # grading columns added after a DB was first built need an explicit ALTER.
+        logged = {r["name"] for r in con.execute("PRAGMA table_info(backtest_log)")}
+        for col, decl in (("graded_spread", "REAL"), ("edge_points", "REAL"),
+                          ("pooled_fcs", "INTEGER NOT NULL DEFAULT 0"), ("generated_at", "TEXT")):
+            if col not in logged:
+                con.execute(f"ALTER TABLE backtest_log ADD COLUMN {col} {decl}")

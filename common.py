@@ -8,13 +8,7 @@ from __future__ import annotations
 import html
 import json
 import re
-import time
 import urllib.request
-from pathlib import Path
-
-APP_DIR = Path(__file__).resolve().parent
-CACHE_DIR = APP_DIR / "cache"
-CACHE_DIR.mkdir(exist_ok=True)
 
 ESPN = 'https://site.api.espn.com/apis/site/v2/sports/football/college-football/'
 CBS = 'https://www.cbssports.com/college-football/rankings/cbs-sports-rankings/'
@@ -33,17 +27,6 @@ def fetch_text(url: str, timeout: int = 25) -> str:
 
 def fetch_json(url: str, timeout: int = 25) -> dict:
     return json.loads(fetch_text(url, timeout))
-
-
-def cached_fetch(name: str, url: str, max_age_hours: float) -> str:
-    path = CACHE_DIR / name
-    if path.exists():
-        age_hours = (time.time() - path.stat().st_mtime) / 3600
-        if age_hours < max_age_hours:
-            return path.read_text(encoding='utf-8')
-    text = fetch_text(url)
-    path.write_text(text, encoding='utf-8')
-    return text
 
 
 def clean(s: str) -> str:
@@ -67,9 +50,36 @@ def normal(s: str) -> str:
     return _ALIASES.get(s, s)
 
 
-def logo_url(row_logo: str | None) -> str:
-    """ESPN already supplies a full logo URL per team/event; just pass it through."""
-    return row_logo or ''
+# CBS's abbreviated school names. FBS membership and FCS pooling both key off
+# team *names*, so every comparison against CBS's list goes through fbs_key().
+_FBS_ALIASES = dict(zip(
+    'missstate ndakotast iowast sandiegost michiganst wmichigan coloradost washingtonst gasouthern jacksonvillest arkansasst appst fresnost texasst utahst kennesawst fau ccarolina fiu newmexicost somiss emichigan cmichigan georgiast sacramentost missourist middletenn kentst ballst sanjosstate'.split(),
+    'mississippistate northdakotastate iowastate sandiegostate michiganstate westernmichigan coloradostate washingtonstate georgiasouthern jacksonvillestate arkansasstate appalachianstate fresnostate texasstate utahstate kennesawstate floridaatlantic coastalcarolina floridainternational newmexicostate southernmiss easternmichigan centralmichigan georgiastate sacramentostate missouristate middletennessee kentstate ballstate sanjosestate'.split()))
+_FBS_ALIASES.update(fiu='floridainternational', newmexicost='newmexicostate', somiss='southernmiss')
+
+
+def fbs_key(name: str) -> str:
+    key = normal(name)
+    return _FBS_ALIASES.get(key, key)
+
+
+def least_squares(pairs, min_points):
+    """Fit y = intercept + slope*x to (x, y) pairs. None when there are too few
+    points or no spread in x. Shared by the spending/talent/penalty priors."""
+    if len(pairs) < min_points:
+        return None
+    xs = [x for x, _ in pairs]
+    ys = [y for _, y in pairs]
+    mean_x, mean_y = sum(xs) / len(xs), sum(ys) / len(ys)
+    sxx = sum((x - mean_x) ** 2 for x in xs)
+    if sxx <= 0:
+        return None
+    slope = sum((x - mean_x) * (y - mean_y) for x, y in pairs) / sxx
+    intercept = mean_y - slope * mean_x
+    total = sum((y - mean_y) ** 2 for y in ys)
+    residual = sum((y - (intercept + slope * x)) ** 2 for x, y in pairs)
+    return {'slope': round(slope, 4), 'intercept': round(intercept, 4), 'teams': len(pairs),
+            'r_squared': round(1 - residual / total, 4) if total else 0.0}
 
 
 # Combined rank (ESPN Top 25 + RotoBaller top 10/honorable mentions blend) and

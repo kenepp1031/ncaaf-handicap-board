@@ -8,9 +8,16 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from common import least_squares
 from db.db import connect
 
-MAX_WEIGHT = 0.15
+# Disabled 2026-09-20. Walk-forward over 786 FBS-vs-FBS games (2025-26) measured
+# this prior as the worst of the three: MAE 13.164 with it alone vs 13.070 with all
+# priors off, and 50.7% ATS vs 52.9%. Penalty differential is mostly game script and
+# opponent quality, not a team trait, and fit() regresses it on the very ratings it
+# then adjusts. Set back to 0.15 only with a walk-forward that shows it earning its
+# place.
+MAX_WEIGHT = 0.0
 FULL_SAMPLE_GAMES = 6
 MIN_FIT_TEAMS = 20
 
@@ -56,26 +63,10 @@ def load_rates(season: int) -> dict:
     return team_rates([dict(r) for r in rows])
 
 
-def _least_squares(pairs):
-    if len(pairs) < MIN_FIT_TEAMS:
-        return None
-    xs, ys = [x for x, _ in pairs], [y for _, y in pairs]
-    mean_x, mean_y = sum(xs) / len(xs), sum(ys) / len(ys)
-    sxx = sum((x - mean_x) ** 2 for x in xs)
-    if sxx <= 0:
-        return None
-    slope = sum((x - mean_x) * (y - mean_y) for x, y in pairs) / sxx
-    intercept = mean_y - slope * mean_x
-    total = sum((y - mean_y) ** 2 for y in ys)
-    residual = sum((y - (intercept + slope * x)) ** 2 for x, y in pairs)
-    return {'slope': round(slope, 4), 'intercept': round(intercept, 4), 'teams': len(pairs),
-            'r_squared': round(1 - residual / total, 4) if total else 0.0}
-
-
 def fit(ratings: dict, rates: dict):
     pairs = [(rates[tid]['net_penalty_margin'], r['rating'])
              for tid, r in ratings.items() if tid in rates and r.get('rating') is not None]
-    return _least_squares(pairs)
+    return least_squares(pairs, MIN_FIT_TEAMS)
 
 
 def weight(games):

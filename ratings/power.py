@@ -10,12 +10,11 @@ from datetime import date, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from common import HOSTILE_ENVIRONMENTS, POOLED_FCS, RIVALRIES, normal
+from common import HOSTILE_ENVIRONMENTS, POOLED_FCS, RIVALRIES, fbs_key, normal
 from db.db import connect
 from ratings.handicap_model import Model
 from ratings import nil_prior, officiating_prior, talent_prior
 
-MIN_GAMES = 2
 # Chosen by walk-forward test — see README/CHANGELOG. Do not retune casually.
 MODEL_RIDGE = 1.5
 MODEL_HALF_LIFE = 365.0
@@ -26,23 +25,14 @@ LETDOWN_LEAN_POINTS = 1.5
 LOOKAHEAD_LEAN_POINTS = 1.0
 BYE_LEAN_POINTS = 1.0
 AP_BLEND_WEIGHT = 0.4
+# Distance from the closing line at which the projection stops being trustworthy.
+# From the 2025-26 walk-forward error curve; see the confidence block in build().
+MODERATE_TRUST_EDGE = 3.0
+LOW_TRUST_EDGE = 6.0
 
 # Percentile cutoffs centered so the median team is a C; A is the top ~15%, F the bottom ~12%.
 GRADE_CUTOFFS = [(0.95, 'A+'), (0.90, 'A'), (0.85, 'A-'), (0.78, 'B+'), (0.70, 'B'), (0.60, 'B-'),
                   (0.50, 'C+'), (0.42, 'C'), (0.35, 'C-'), (0.28, 'D+'), (0.20, 'D'), (0.12, 'D-')]
-
-# See ingest/rankings.py's _FBS_ALIASES — same canonicalization, needed again
-# here because pooling keys off team *names*, not the poll ingest step.
-_FBS_ALIASES = dict(zip(
-    'missstate ndakotast iowast sandiegost michiganst wmichigan coloradost washingtonst gasouthern jacksonvillest arkansasst appst fresnost texasst utahst kennesawst fau ccarolina fiu newmexicost somiss emichigan cmichigan georgiast sacramentost missourist middletenn kentst ballst sanjosstate'.split(),
-    'mississippistate northdakotastate iowastate sandiegostate michiganstate westernmichigan coloradostate washingtonstate georgiasouthern jacksonvillestate arkansasstate appalachianstate fresnostate texasstate utahstate kennesawstate floridaatlantic coastalcarolina floridainternational newmexicostate southernmiss easternmichigan centralmichigan georgiastate sacramentostate missouristate middletennessee kentstate ballstate sanjosestate'.split()))
-_FBS_ALIASES.update(fiu='floridainternational', newmexicost='newmexicostate', somiss='southernmiss')
-
-
-def fbs_key(name):
-    key = normal(name)
-    return _FBS_ALIASES.get(key, key)
-
 
 def pooled(team_id, names, fbs_names):
     if not fbs_names:
@@ -110,24 +100,6 @@ def _fetch_fbs_names(con):
 def _fetch_ranks(con, season, poll_type):
     return {r['team_id']: r['rank'] for r in con.execute(
         'SELECT team_id, rank FROM polls WHERE season=? AND poll_type=?', (season, poll_type)).fetchall()}
-
-
-def ats_record(games, team_id, before):
-    record = {'wins': 0, 'losses': 0, 'pushes': 0}
-    for g in games:
-        if not g.get('completed') or g.get('home_score') is None or g.get('home_spread') is None:
-            continue
-        if date.fromisoformat(g['game_date']) >= before:
-            continue
-        if g['home_id'] == team_id:
-            margin, spread = g['home_score'] - g['away_score'], g['home_spread']
-        elif g['away_id'] == team_id:
-            margin, spread = g['away_score'] - g['home_score'], -g['home_spread']
-        else:
-            continue
-        covered = margin + spread
-        record['pushes' if covered == 0 else ('wins' if covered > 0 else 'losses')] += 1
-    return record
 
 
 def opponent(g, team_id):
@@ -292,7 +264,7 @@ def build(season: int, as_of: date, use_priors: bool = True) -> dict:
         talent = talent_prior.load(season) if use_priors else {}
         off_rates = officiating_prior.load_rates(season) if use_priors else {}
 
-        spend_fits = nil_prior.fit(spend, ratings, names) if spend else None
+        spend_fit = nil_prior.fit(spend, ratings, names) if spend else None
         off_fit = officiating_prior.fit(ratings, off_rates) if off_rates else None
         talent_fit = talent_prior.fit(talent, ratings, names) if talent else None
 
@@ -307,8 +279,7 @@ def build(season: int, as_of: date, use_priors: bool = True) -> dict:
             r = ratings.get(tid)
             top_ratings.append({'id': tid, 'team': names.get(tid, tid), 'combined_rank': rank, 'ap_rank': ap_ranks.get(tid),
                                  'rating': r['rating'] if r else None, 'offense': r['offense'] if r else None,
-                                 'defense': r['defense'] if r else None, 'games': r['games'] if r else 0,
-                                 'ats': ats_record(team_games(tid), tid, as_of)})
+                                 'defense': r['defense'] if r else None, 'games': r['games'] if r else 0})
 
         peer_ids = {tid for tid in ratings if fbs_key(names.get(tid, '')) in fbs_names} if fbs_names else set(ratings)
         peers = [ratings[tid] for tid in peer_ids]
@@ -390,10 +361,9 @@ def build(season: int, as_of: date, use_priors: bool = True) -> dict:
             proj = None
             if hr and ar:
                 pooled_fcs = [side for side, mid in (('home', home_model), ('away', away_model)) if mid == POOLED_FCS]
-                home_spend = nil_prior.spending(spend, names.get(hid, '')) if spend else None
-                away_spend = nil_prior.spending(spend, names.get(aid, '')) if spend else None
-                margin_shift, _ = nil_prior.margin_shift(spend_fits, home_spend, away_spend, hr['rating'], ar['rating'],
-                                                          season_games.get(hid, 0), season_games.get(aid, 0)) if spend_fits else (0.0, None)
+                margin_shift = nil_prior.margin_shift(spend_fit, nil_prior.roster_cost(spend, names.get(hid, '')),
+                                                      nil_prior.roster_cost(spend, names.get(aid, '')), hr['rating'], ar['rating'],
+                                                      season_games.get(hid, 0), season_games.get(aid, 0)) if spend_fit else 0.0
                 off_shift = 0.0
                 if off_fit and home_model == hid and away_model == aid:
                     off_shift = officiating_prior.margin_shift(off_fit, off_rates.get(hid), off_rates.get(aid), hr['rating'], ar['rating'])
@@ -412,11 +382,17 @@ def build(season: int, as_of: date, use_priors: bool = True) -> dict:
                 total_edge = None if e.get('total') is None else round((hp + ap) - e['total'], 2)
                 sample = min(season_games.get(hid, 0), season_games.get(aid, 0))
                 lean_side = None if lean_edge is None or abs(lean_edge) < 1 else ('Home' if lean_edge > 0 else 'Away')
+                # Reliability of the projection, NOT enthusiasm for a bet. Inverted
+                # 2026-09-20: the old rule read a bigger disagreement with the market as
+                # more confidence. Walk-forward over 786 FBS-vs-FBS games says the
+                # opposite -- margin MAE runs 10.7 where the model sits within a point of
+                # the close and 17.9 where it is 10+ points away, and the 6-10 pt bucket
+                # went 49-61 ATS. Distance from the market measures model error, not edge.
                 if lean_edge is None:
                     confidence = 'Unavailable'
-                elif sample < 2 or abs(lean_edge) < 2:
+                elif sample < 2 or abs(lean_edge) >= LOW_TRUST_EDGE:
                     confidence = 'Low'
-                elif sample < 5 or abs(lean_edge) < 4:
+                elif sample < 5 or abs(lean_edge) >= MODERATE_TRUST_EDGE:
                     confidence = 'Moderate'
                 else:
                     confidence = 'High'
@@ -424,7 +400,10 @@ def build(season: int, as_of: date, use_priors: bool = True) -> dict:
                         'projected_total': round(hp + ap, 1), 'lean_home_spread': lean, 'lean_source': 'model',
                         'lean_side': lean_side, 'home_edge_points': home_edge, 'lean_edge_points': lean_edge,
                         'total_edge_points': total_edge, 'sample_games': sample, 'confidence': confidence,
-                        'confidence_detail': f'{sample} current-season completed games for the less-observed team. Qualitative confidence; not a calibrated cover probability.',
+                        'confidence_detail': (f'{sample} current-season completed games for the less-observed team. '
+                                              f'Confidence rates how much to trust the projection, and falls as the model '
+                                              f'moves away from the market — measured walk-forward, that distance tracks '
+                                              f'model error, not edge. Not a cover probability.'),
                         'spend_margin_shift': margin_shift, 'officiating_margin_shift': off_shift, 'talent_margin_shift': talent_shift,
                         'pooled_fcs_json': json.dumps(pooled_fcs)}
             else:
@@ -434,23 +413,56 @@ def build(season: int, as_of: date, use_priors: bool = True) -> dict:
             _store_notes(con, e['game_id'], 'away', away_notes)
             if w:
                 con.execute('UPDATE weather SET alert_text=?, lean_note=? WHERE game_id=?', (wa, wn, e['game_id']))
-            # Keep the pre-kickoff projection for finished games so the backtest grades an honest forecast.
-            if e.get('completed') and con.execute('SELECT 1 FROM projections WHERE game_id=?', (e['game_id'],)).fetchone():
+            # A finished game never gets a projection written, full stop. The old rule
+            # ("keep the first one") looked equivalent but wasn't: a backfill run is the
+            # first writer for games already played, so it froze hindsight projections
+            # into the table permanently -- ungradable and un-recomputable. Whatever was
+            # stored before kickoff stays; nothing new is minted after it.
+            if e.get('completed'):
                 continue
             _store_projection(con, e['game_id'], proj)
+            _store_snapshot(con, e['game_id'], e, proj)
         con.commit()
 
     fit_count = len(completed_rows)
     fcs = ratings.get(POOLED_FCS)
-    status = build_status(fit_count, spend_fits, off_fit, talent_fit, fcs, scope)
+    status = build_status(fit_count, spend_fit, off_fit, talent_fit, fcs, scope)
     return {'as_of': as_of.isoformat(), 'season': season, 'fit_games': fit_count, 'teams_rated': len(ratings),
-            'games_projected': sum(1 for e in events), 'status': status}
+            'games_projected': len(events), 'status': status}
 
 
 def _store_notes(con, game_id, side, notes):
     con.execute('DELETE FROM game_notes WHERE game_id=? AND side=?', (game_id, side))
     for i, n in enumerate(notes):
         con.execute('INSERT INTO game_notes (game_id, side, note_order, note_text) VALUES (?,?,?,?)', (game_id, side, i, n))
+
+
+def _store_snapshot(con, game_id, event, proj):
+    """Append this run's pre-kickoff projection to the audit trail.
+
+    Called only for games that have not kicked off, so every row here is an
+    honest forecast by construction. One row per (game, run); the grader takes
+    the last one before kickoff.
+    """
+    if proj.get('lean_source') != 'model':
+        return
+    now = datetime.now().astimezone().isoformat(timespec='seconds')
+    # Gate on the clock, not games.completed. That flag only advances when a scrape
+    # refreshes it, so a --skip-scrape run (or any run while a game is in progress)
+    # sees completed=0 for a game that kicked off hours ago and would write a
+    # "forecast" made after the fact. Kickoff time is the thing that can't go stale.
+    if event.get('kickoff') and now >= event['kickoff']:
+        return
+    con.execute(
+        """INSERT INTO projection_snapshots (game_id, generated_at, kickoff, fair_home_spread,
+                lean_home_spread, projected_total, lean_side, lean_edge_points, home_edge_points,
+                sample_games, confidence, market_home_spread, pooled_fcs_json)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(game_id, generated_at) DO NOTHING""",
+        (game_id, now, event.get('kickoff'), proj.get('fair_home_spread'), proj.get('lean_home_spread'),
+         proj.get('projected_total'), proj.get('lean_side'), proj.get('lean_edge_points'),
+         proj.get('home_edge_points'), proj.get('sample_games'), proj.get('confidence'),
+         event.get('home_spread'), proj.get('pooled_fcs_json')))
 
 
 def _store_projection(con, game_id, proj):
@@ -479,21 +491,24 @@ def _store_projection(con, game_id, proj):
          proj.get('pooled_fcs_json'), now))
 
 
-def build_status(fit_count, spend_fits, off_fit, talent_fit, fcs, scope):
+def build_status(fit_count, spend_fit, off_fit, talent_fit, fcs, scope):
     status = (f'Fit on {fit_count} completed FBS games. Offense and defense ranks/grades compare {scope} teams only. '
               f'Previous-season scores are included when available, with recency weighting ({MODEL_HALF_LIFE:.0f}-day half-life). '
               'Predictions use opponent-adjusted scoring, home/neutral venue and rest/lookahead context. '
-              'Confidence is qualitative and has not been calibrated as a cover probability.')
+              'Confidence rates how much to trust a projection and falls as the model moves away from '
+              'the market; it is not a calibrated cover probability.')
     if fcs:
         status += (f" Every FCS opponent shares one pooled rating drawn from {fcs['games']} games against FBS teams.")
-    if spend_fits and spend_fits.get('roster_cost'):
-        roster_fit = spend_fits['roster_cost']
+    if spend_fit:
         status += (f" A roster-cost prior nudges the projected margin while a team has under {nil_prior.FADE_GAMES} games "
-                   f"this season (fitted this refresh at {roster_fit['points_per_doubling']} pts per doubling of payroll, "
-                   f"R² {roster_fit['r_squared']}).")
-    if off_fit:
+                   f"this season (fitted this refresh at {spend_fit['points_per_doubling']} pts per doubling of payroll, "
+                   f"R² {spend_fit['r_squared']}).")
+    if off_fit and officiating_prior.MAX_WEIGHT > 0:
         status += (f" A penalty-tendency prior (fitted this refresh at {off_fit['slope']} pts of margin per penalty of net "
                    f"differential, R² {off_fit['r_squared']} across {off_fit['teams']} teams) nudges the margin.")
+    elif off_fit:
+        status += (f" The penalty-tendency prior is disabled (it measured worse than leaving it off; "
+                   f"this refresh it would have fit at R² {off_fit['r_squared']}).")
     if talent_fit:
         status += (f" A roster-talent prior from 247Sports (fitted this refresh at {talent_fit['slope']} rating pts per point "
                    f"of average player rating, R² {talent_fit['r_squared']} across {talent_fit['teams']} teams) pulls each "

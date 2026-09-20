@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from db.db import init_db, connect
-from ingest import espn_scoreboard, rankings, cbs_odds, dk_lines, weather as weather_ingest
+from ingest import espn_scoreboard, rankings, cbs_odds, dk_lines, kalshi, weather as weather_ingest
 from ingest import nil_spending, talent as talent_ingest, officiating as officiating_ingest
 from ratings import power
 from backtest.log_results import log_season
@@ -87,6 +87,10 @@ def weekly_run(season: int, week: int, skip_scrape: bool = False) -> Path:
             dk_lines.ingest()
         except Exception as e:
             print(f'  DK lines refresh failed: {e}')
+        try:
+            kalshi.ingest()
+        except Exception as e:
+            print(f'  Kalshi money refresh failed: {e}')
         try:
             weather_ingest.refresh_week(week_start.isoformat(), (week_start + timedelta(days=6)).isoformat())
         except Exception as e:

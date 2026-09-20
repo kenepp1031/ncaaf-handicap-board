@@ -2,12 +2,6 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "cfb-dashboard",
-      "runtimeExecutable": "python",
-      "runtimeArgs": ["dashboard.py", "--no-browser"],
-      "port": 8768
-    },
-    {
       "name": "ncaaf-streamlit",
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "streamlit", "run", "streamlit_app.py", "--server.port", "8770", "--server.headless", "true"],

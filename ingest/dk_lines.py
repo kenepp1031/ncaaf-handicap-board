@@ -89,6 +89,7 @@ def ingest() -> dict:
                        game_id=excluded.game_id, spread=excluded.spread, odds=excluded.odds,
                        handle_pct=excluded.handle_pct, bets_pct=excluded.bets_pct, captured_at=excluded.captured_at""",
                 (g['game_id'] if g else None, r['team'], r['month_day'], r['spread'], r['odds'], r['handle'], r['bets'], now))
+            _capture_split(con, r['team'], r['month_day'], now, r['handle'], r['bets'])
             n_splits += 1
             if not g:
                 continue
@@ -107,6 +108,19 @@ def ingest() -> dict:
             n_lines += 1
         con.commit()
     return {'splits': n_splits, 'lines_captured': n_lines, 'warnings': warnings}
+
+
+def _capture_split(con, team_key, month_day, captured_at, handle, bets):
+    """One row per observed change in handle/bets share, same idea as _capture_line."""
+    latest = con.execute(
+        """SELECT handle_pct, bets_pct FROM splits_history
+           WHERE team_key=? AND month_day=? ORDER BY captured_at DESC LIMIT 1""", (team_key, month_day)).fetchone()
+    if latest and (latest['handle_pct'], latest['bets_pct']) == (handle, bets):
+        return False
+    con.execute(
+        """INSERT OR IGNORE INTO splits_history (team_key, month_day, captured_at, handle_pct, bets_pct)
+           VALUES (?,?,?,?,?)""", (team_key, month_day, captured_at, handle, bets))
+    return True
 
 
 def _capture_line(con, game_id, captured_at, kickoff, home_spread, total, home_odds, away_odds, source):

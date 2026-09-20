@@ -83,6 +83,33 @@ CREATE TABLE IF NOT EXISTS splits (
     PRIMARY KEY (team_key, month_day)
 );
 
+-- One row per observed change in a side's money/ticket share, so a sudden
+-- handle jump (someone loading up) can be seen between refreshes.
+CREATE TABLE IF NOT EXISTS splits_history (
+    team_key TEXT NOT NULL,
+    month_day TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    handle_pct REAL,
+    bets_pct REAL,
+    PRIMARY KEY (team_key, month_day, captured_at)
+);
+
+-- Kalshi winner-market money per game: real dollars takers put on each side.
+CREATE TABLE IF NOT EXISTS kalshi (
+    game_id TEXT PRIMARY KEY,
+    event_ticker TEXT,
+    home_price REAL,                -- last trade, dollars per $1 payout = implied win chance
+    away_price REAL,
+    home_dollars REAL,
+    away_dollars REAL,
+    home_dollars_24h REAL,
+    away_dollars_24h REAL,
+    biggest_dollars REAL,
+    biggest_side TEXT,              -- 'home' | 'away'
+    biggest_at TEXT,
+    captured_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS geocode_cache (
     city TEXT NOT NULL,
     state TEXT NOT NULL,
@@ -198,6 +225,29 @@ CREATE TABLE IF NOT EXISTS projections (
     generated_at TEXT
 );
 
+-- Append-only record of every projection made BEFORE kickoff. `projections` is a
+-- single current-view row per game and gets overwritten each run, so it cannot
+-- answer "what did we actually say on Friday?". This can. The grader reads the
+-- last snapshot captured before kickoff and nothing else, so a backfill run can
+-- never launder hindsight into the record.
+CREATE TABLE IF NOT EXISTS projection_snapshots (
+    game_id TEXT NOT NULL,
+    generated_at TEXT NOT NULL,
+    kickoff TEXT,
+    fair_home_spread REAL,
+    lean_home_spread REAL,
+    projected_total REAL,
+    lean_side TEXT,
+    lean_edge_points REAL,
+    home_edge_points REAL,
+    sample_games INTEGER,
+    confidence TEXT,
+    market_home_spread REAL,   -- the line on the board when this snapshot was taken
+    pooled_fcs_json TEXT,
+    PRIMARY KEY (game_id, generated_at)
+);
+CREATE INDEX IF NOT EXISTS idx_proj_snap_game ON projection_snapshots(game_id, generated_at);
+
 CREATE TABLE IF NOT EXISTS backtest_log (
     game_id TEXT PRIMARY KEY,
     season INTEGER NOT NULL,
@@ -210,5 +260,9 @@ CREATE TABLE IF NOT EXISTS backtest_log (
     error_total REAL,
     ats_result TEXT,      -- win | loss | push | NULL
     ou_result TEXT,        -- over | under | push | NULL
-    confidence TEXT
+    confidence TEXT,
+    graded_spread REAL,   -- the number actually bet (lean_home_spread), not the raw model line
+    edge_points REAL,     -- graded_spread vs closing_spread; the bucket this pick belongs in
+    pooled_fcs INTEGER NOT NULL DEFAULT 0,  -- 1 = an FCS side was pooled; excluded from headline accuracy
+    generated_at TEXT     -- when the graded forecast was made (always < kickoff)
 );

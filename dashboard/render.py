@@ -1,8 +1,15 @@
-"""Static dashboard.html generator. Pure Python f-strings + one inline CSS
-constant, no template engine, no client-side fetch/polling — everything is
-read from SQLite once and baked into the page, following NFL 2.0's
-dashboard/render.py technique. Visual language (dark-navy theme, matchup
-cards, power ranking table) is ported from this app's own app.css/app.js.
+"""Static dashboard.html generator: one page, one scroll. Everything is read
+from SQLite once and baked into the page as inline HTML + CSS -- no template
+engine, no client-side fetch. The week's Top-50 matchups are one list in
+kickoff order.
+
+There is deliberately no ranked pick list. The page used to lead with the five
+biggest model-vs-market disagreements; walk-forward over 786 FBS-vs-FBS games
+(2025-26) that is the model's worst bucket, not its best -- margin MAE 17.9 at
+10+ points of disagreement against 10.7 inside a point, and 49-61 ATS in the
+6-10 point band. Ranking games by disagreement was selecting for model error.
+The lean still shows on each card, with a confidence label that now falls as
+the model moves away from the market.
 """
 from __future__ import annotations
 
@@ -10,11 +17,11 @@ import html
 import json
 import re
 import sys
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from common import logo_url, normal
+from common import normal
 from db.db import connect
 
 OUT_PATH = Path(__file__).resolve().parent / "dashboard.html"
@@ -23,24 +30,27 @@ CSS = """
 :root{--bg:#060a12;--panel:#0f1826;--panel-alt:#0b1420;--border:#1e2c42;--ink:#e7edf7;--muted:#7c8dab;
 --muted2:#5c6c86;--accent:#2f8eff;--win:#35d488;--loss:#ff5c66;--note-bg:#2c2110;--note-fg:#f2b84b;
 --weather-bg:#101f33;--weather-fg:#9fd0ff;--tag:#4fa8ff;--total:#bcd6ff;--header-row:#101b2c;--row-border:#1a2536}
-*{box-sizing:border-box}html{background:var(--bg)}
+*{box-sizing:border-box}html{background:var(--bg);scroll-behavior:smooth}
 body{max-width:1440px;margin:auto;padding:28px;font-family:"Segoe UI",Arial,sans-serif;color:var(--ink);background:var(--bg)}
 h1{margin:0;font-size:32px}h2{font-size:21px;margin:0 0 14px}p{color:var(--muted)}
 header{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;gap:14px;flex-wrap:wrap}
 .tag{font-size:12px;color:var(--tag);font-weight:700;letter-spacing:1.5px}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:20px;margin:16px 0}
 small,.muted{color:var(--muted)}#source{font-size:13px;line-height:1.6}
+a{color:var(--tag)}
 table{width:100%;border-collapse:collapse;font-size:14px}
 th{text-align:left;font-size:12px;color:var(--muted);background:var(--header-row);padding:12px 8px}
 td{padding:12px 8px;border-bottom:1px solid var(--row-border)}
-.scroll{overflow:auto;max-height:520px}
+.scroll{overflow-x:auto}
 .win{color:var(--win)}.loss{color:var(--loss)}.empty{text-align:center;padding:30px;color:var(--muted2)}
-a{color:var(--tag)}
-.pill{background:var(--weather-bg);color:var(--weather-fg);border-radius:5px;padding:4px 7px;white-space:nowrap}
-.match-head,.match{display:grid;grid-template-columns:minmax(0,1fr) 260px minmax(0,1fr);gap:22px}
-.match-head{padding:12px 20px;background:var(--header-row);font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:1px}
-.match-head span:nth-child(2){text-align:center}.match-head span:last-child{text-align:right}
-.match{padding:24px 20px;border-bottom:1px solid var(--row-border);align-items:center}
+.tier-low{--tier:var(--muted)}.tier-moderate{--tier:var(--accent)}.tier-high{--tier:var(--win)}
+.conf{display:inline-block;margin-top:4px;color:var(--tier);font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;padding:2px 8px;border:1px solid var(--tier);border-radius:4px;opacity:.85}
+.conf b{font-size:12px}
+.picks{display:flex;flex-direction:column;gap:6px}
+.pick{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;padding:10px 12px;border-radius:8px;background:var(--panel-alt);border:1px solid var(--border);border-left:3px solid var(--tier,var(--muted2));color:var(--ink);text-decoration:none;font-size:14px}
+.pick:hover{border-color:var(--accent);border-left-color:var(--tier,var(--accent))}
+.pick .n{color:var(--tag);font-weight:700}.pick .when{color:var(--muted);font-size:12px}.pick .conf{margin:0}
+.match{display:grid;grid-template-columns:minmax(0,1fr) 260px minmax(0,1fr);gap:22px;padding:24px 20px;border-bottom:1px solid var(--row-border);align-items:center;scroll-margin-top:16px}
 .match:nth-child(even){background:var(--panel-alt)}
 .team-title{display:flex;align-items:center;gap:12px}.team-title img{width:46px;height:46px;object-fit:contain}
 .team-title h3{font-size:21px;margin:4px 0}.rank{color:var(--tag);font-size:14px}
@@ -49,7 +59,7 @@ a{color:var(--tag)}
 .stadium{font-size:12px;color:var(--muted2);margin:12px 0 6px;line-height:1.7}
 .weather{display:inline-block;font-size:12px;background:var(--weather-bg);color:var(--weather-fg);padding:7px 9px;border-radius:5px;line-height:1.6}
 .weather small{font-size:10px}
-.market{text-align:center}.kickoff{font-size:11px;color:var(--muted);margin-bottom:9px}
+.market{text-align:center}.kickoff{font-size:12px;color:var(--muted);margin-bottom:9px}.kickoff b{color:var(--ink)}
 .total{font-size:13px;font-weight:700;margin-bottom:9px;color:var(--total)}
 .market-source{font-size:10px;color:var(--muted2);margin-top:8px}
 .split{margin-top:10px;text-align:left}
@@ -59,37 +69,23 @@ a{color:var(--tag)}
 .split-row span{grid-column:2;font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted2);text-align:center;margin-top:1px}
 .split-bar{display:flex;gap:2px;height:8px;border-radius:4px;overflow:hidden;background:var(--row-border)}
 .split-bar i{display:block;height:100%;border-radius:4px}
-.match-list{max-height:900px;overflow:auto}
-.roster{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:15px}
-.roster div{padding:8px;border-bottom:1px solid var(--row-border);font-size:13px}
+.money-tag{margin-top:6px;font-size:11px;color:var(--muted);text-align:center}.money-tag b{color:var(--ink)}
+.money-tag em{font-style:normal;font-size:9px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;padding:2px 6px;border-radius:4px;margin-right:4px}
+.mt-sharp{background:#10301f;color:var(--win)}.mt-big{background:var(--row-border);color:var(--total)}.mt-whale{background:#0f2a4a;color:var(--weather-fg)}.mt-loaded{background:var(--note-bg);color:var(--note-fg)}
 details summary{cursor:pointer;font-weight:600}
-.power{font-size:12px;color:var(--muted);margin-top:10px;line-height:1.6;text-align:left}.power b{color:var(--tag)}
 .notes{margin-top:8px;display:flex;gap:4px;flex-wrap:wrap}
 .note{display:inline-block;font-size:10px;background:var(--note-bg);color:var(--note-fg);padding:3px 7px;border-radius:4px;margin:2px 0 0}
 .away .notes{justify-content:flex-end}
 .model-detail{font-size:11px;color:var(--muted);text-align:left;margin:9px 0 2px;border-top:1px dashed var(--border);padding-top:7px;line-height:1.7}
 .model-detail summary{font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--muted2);text-align:center}
 .model-detail>div{margin-top:6px}.model-detail b{color:var(--ink)}.model-detail small{display:block;color:var(--muted2);font-size:10px}
-.model-weather{background:var(--weather-bg);color:var(--weather-fg);padding:5px 7px;border-radius:4px}
-.health{font-size:12px;margin-top:12px}
-.health-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;padding:7px 0;border-bottom:1px solid var(--row-border);align-items:baseline}
-.health-row span{color:var(--muted)}.health-row b{color:var(--ink);text-align:right}
-.health-row small{grid-column:1/-1;color:var(--muted2);font-size:10px;line-height:1.6}
 .weather-alert{grid-column:1/-1;background:var(--loss);color:#fff;font-weight:700;font-size:13px;padding:9px 14px;border-radius:6px;margin-bottom:14px}
-.tier-low{--tier:var(--muted)}.tier-moderate{--tier:var(--accent)}.tier-high{--tier:var(--win)}
-.conf{display:inline-block;margin-top:4px;color:var(--tier);font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;padding:2px 8px;border:1px solid var(--tier);border-radius:4px;opacity:.85}
-.conf b{font-size:12px}
-.toppick .match{border-left:3px solid var(--muted2);padding-left:24px}
-.toppick:has(.tier-moderate) .match{border-left-color:var(--accent)}.toppick:has(.tier-high) .match{border-left-color:var(--win)}
-.previous-game{margin-top:10px;padding-top:6px;border-top:1px dashed var(--border);font-size:11px;line-height:1.6;color:var(--muted)}
-.previous-game small{display:block;font-size:9px;font-weight:700;letter-spacing:.5px}
 .grades{font-size:13px;line-height:1.7;margin:10px 0}.grades b{color:var(--tag)}.grades small{display:block;color:var(--muted);font-size:10px}
 .model-lean{font-size:13px;margin:8px 0;line-height:1.6}
 .projection{font-size:11px;color:var(--muted);margin:8px 0 10px;line-height:1.7}.projection b{color:var(--ink)}
 .projected-score{font-size:10px;margin-top:4px}
-[hidden]{display:none!important}
-@media(max-width:850px){body{padding:12px}header{display:block}.match-head,.match{grid-template-columns:minmax(0,1fr) 175px minmax(0,1fr);gap:8px}.match{padding:18px 5px}.team-title{display:block}.away .team-title img{float:right}.team-title h3{font-size:16px}.team-title img{width:34px;height:34px}.roster{grid-template-columns:repeat(2,1fr)}.stadium{font-size:11px}}
-@media(max-width:550px){.match-head,.match{grid-template-columns:minmax(0,1fr) 130px minmax(0,1fr)}.team-title h3{font-size:14px}.weather{padding:4px}.match-head{font-size:10px;padding:10px 5px}}
+@media(max-width:850px){body{padding:12px}header{display:block}.card{padding:14px}.match{grid-template-columns:minmax(0,1fr) 175px minmax(0,1fr);gap:8px;padding:18px 5px}.team-title{display:block}.away .team-title img{float:right}.team-title h3{font-size:16px}.team-title img{width:34px;height:34px}.stadium{font-size:11px}}
+@media(max-width:550px){.match{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px}.weather-alert{order:-2}.market{grid-column:1/-1;order:-1;padding-bottom:10px;border-bottom:1px dashed var(--border)}.team-title h3{font-size:15px}.weather{padding:4px 6px}}
 """
 
 
@@ -107,10 +103,21 @@ def spread_text(n):
     return ('+' if n > 0 else '') + half(n)
 
 
-def money(n):
-    if n is None:
-        return '—'
-    return f'${n / 1e6:.1f}M' if n >= 1e6 else f'${round(n / 1e3)}K'
+def side_spread(g, side):
+    """Market spread from one side's point of view. Only home_spread is kept
+    current by every line source, so derive the away number from it."""
+    if g['home_spread'] is None:
+        return None
+    return g['home_spread'] if side == 'home' else -g['home_spread']
+
+
+def time_label(iso):
+    """'1:00 PM Saturday' in this machine's local time zone, from any ISO timestamp with an offset."""
+    try:
+        dt = datetime.fromisoformat(iso).astimezone()
+    except (TypeError, ValueError):
+        return iso or 'Time TBD'
+    return f"{dt.strftime('%I:%M %p').lstrip('0')} {dt.strftime('%A')}"
 
 
 def trend_text(v):
@@ -131,10 +138,9 @@ def trend_class(v):
     return 'win' if v > 0 else ('loss' if v < 0 else '')
 
 
-def team_title(g, side, notes_by_side):
-    tid = g[f'{side}_id']
+def team_title(g, side):
     name = g[f'{side}_name']
-    logo = logo_url(g[f'{side}_logo'])
+    logo = g[f'{side}_logo'] or ''
     rank = g[f'{side}_combined']
     sub = ('DESIGNATED HOME · NEUTRAL SITE' if g['neutral'] else 'HOME') if side == 'home' else 'AWAY'
     img = f'<img src="{esc(logo)}" alt="" loading="lazy">' if logo else ''
@@ -156,28 +162,21 @@ def grades_block(rating_row, season_games=0):
             f'<small>Out of {pop} {esc(scope)} teams · {basis}{provisional}</small></div>')
 
 
-def ats_text(record):
-    if not record or record['wins'] + record['losses'] + record['pushes'] == 0:
+def notes_block(notes):
+    if not notes:
         return ''
-    return f"{record['wins']}-{record['losses']}-{record['pushes']} ATS"
-
-
-def notes_block(notes, ats):
-    items = ([ats] if ats else []) + notes
-    if not items:
-        return ''
-    pills = ''.join(f'<span class="note">{esc(n)}</span>' for n in items)
+    pills = ''.join(f'<span class="note">{esc(n)}</span>' for n in notes)
     return f'<div class="notes">{pills}</div>'
 
 
 def weather_text(w, indoor):
     if indoor:
         return '<span class="weather">Indoor venue · field conditions sheltered</span>'
-    if not w or w['status'] not in ('Kickoff through approximately 3 hours after kickoff',):
-        status = (w['status'] if w else 'Game forecast unavailable')
+    if not w or w['status'] != 'Kickoff through approximately 3 hours after kickoff':
+        status = w['status'] if w else 'Game forecast unavailable'
         return f'<span class="weather">{esc(status)}</span>'
     return (f'<span class="weather"><b>{round(w["temp_f"])}°F</b>, wind {round(w["wind_mph"] or 0)} mph'
-            f'<br><small>updated {esc(w["checked_at"])}</small></span>')
+            f'<br><small>updated {esc(time_label(w["checked_at"]))}</small></span>')
 
 
 def weather_alert_block(w):
@@ -189,12 +188,14 @@ def weather_alert_block(w):
 def model_detail(g, proj):
     if not proj or proj['lean_source'] != 'model':
         return ''
+
     def toward(n):
         if n is None:
             return None
         if n == 0:
             return 'even with the market'
         return f'{half(abs(n))} pts toward ' + esc(g['home_name'] if n > 0 else g['away_name'])
+
     rows = []
     raw = toward(proj['home_edge_points'])
     if raw:
@@ -208,8 +209,9 @@ def model_detail(g, proj):
     used = toward(proj['lean_edge_points'])
     if used:
         rows.append(f'<div>Edge behind the lean: <b>{used}</b>'
-                    f'<small>Needs 1.0 pt for any lean; 2.0 pts and two games each for Moderate; '
-                    f'4.0 pts and five games each for High.</small></div>')
+                    f'<small>Needs 1.0 pt for any lean. Confidence falls as this gap grows: '
+                    f'High under 3.0 pts, Moderate under 6.0, Low beyond that — and Low for '
+                    f'either team under two games this season.</small></div>')
     if proj['projected_total'] is not None:
         gap = proj['total_edge_points']
         compared = 'no market total to compare' if gap is None else f"{half(abs(gap))} pts {'above' if gap >= 0 else 'below'} the market"
@@ -231,19 +233,70 @@ def model_detail(g, proj):
     return f'<details class="model-detail"><summary>Model detail</summary>{"".join(rows)}</details>' if rows else ''
 
 
-def lean_line(proj):
+def lean_text(g, proj):
     side = (proj.get('lean_side') or '').lower() if proj else ''
-    if side and proj.get(f'{side}_name'):
-        text = esc(proj[f'{side}_name']) + ' ' + spread_text(proj.get(f'{side}_spread'))
-    else:
-        text = 'No lean'
+    if not side:
+        return None
+    return esc(g[f'{side}_name']) + ' ' + spread_text(side_spread(g, side))
+
+
+def confidence_html(proj):
     tier = proj.get('confidence') if proj else None
-    rating = confidence_rating(proj) if proj and side else None
+    rating = confidence_rating(proj) if proj and proj.get('lean_side') else None
     if rating is None:
-        confidence = f'<small>Confidence: {esc(tier or "Unavailable")}</small>'
-    else:
-        confidence = f'<small class="conf tier-{tier.lower()}">{esc(tier)} · <b>{rating}</b>/10</small>'
-    return f'<div class="model-lean">Our lean: <b>{text}</b><br>{confidence}</div>'
+        return f'<small>Confidence: {esc(tier or "Unavailable")}</small>'
+    return f'<small class="conf tier-{tier.lower()}">{esc(tier)} · <b>{rating}</b>/10</small>'
+
+
+def lean_line(g, proj):
+    text = lean_text(g, proj) or 'No lean'
+    return f'<div class="model-lean">Our lean: <b>{text}</b><br>{confidence_html(proj)}</div>'
+
+
+SHARP_GAP = 20      # money % this far above ticket % = bigger bettors on that side
+WHALE_GAP = 30      # ...this far above, on a side the public isn't on = a few very large bets
+WHALE_MAX_BETS = 35
+LOADED_JUMP = 8     # money % up this much since the last refresh while tickets barely moved
+LINE_CONFIRM = 0.5  # spread moved at least this far toward the side since the first capture
+
+
+def line_note(line_move):
+    """How the spread has moved for this side since the first capture (positive = their way)."""
+    if line_move is None:
+        return ''
+    if line_move >= LINE_CONFIRM:
+        return f' · ✅ line moved {line_move:g} their way'
+    if line_move <= -LINE_CONFIRM:
+        return f' · ⚠️ line moved {-line_move:g} against them'
+    return ' · line hasn’t moved'
+
+
+def money_tags(split, line_move=None):
+    """Sharp / Big money / Whale / Loaded-up tags for one side of a DraftKings split.
+
+    Money % above ticket % only says the bets on that side are bigger. It counts as
+    Sharp only when the book also moved the spread that way; otherwise it is Big money,
+    or Whale when a few very large bets sit on a side the book isn't moving for.
+    """
+    handle, bets = split.get('handle_pct'), split.get('bets_pct')
+    if handle is None or bets is None:
+        return []
+    tags = []
+    gap = handle - bets
+    # Books move the number for pros and leave it alone for high-rollers, so the line
+    # decides which one it is: moved their way = Sharp, big lopsided money it ignores = Whale.
+    if gap >= SHARP_GAP and line_move is not None and line_move >= LINE_CONFIRM:
+        tags.append(('sharp', '🦈 Sharp', f'money {round(gap)} pts above tickets{line_note(line_move)}'))
+    elif gap >= WHALE_GAP and bets <= WHALE_MAX_BETS:
+        tags.append(('whale', '🐋 Whale', f'{round(handle)}% of the money on {round(bets)}% of the bets{line_note(line_move)}'))
+    elif gap >= SHARP_GAP:
+        tags.append(('big', '💰 Big money', f'money {round(gap)} pts above tickets{line_note(line_move)}'))
+    prior = split.get('prior')
+    if prior and prior.get('handle_pct') is not None and prior.get('bets_pct') is not None:
+        jump = handle - prior['handle_pct']
+        if jump >= LOADED_JUMP and bets - prior['bets_pct'] <= jump / 2:
+            tags.append(('loaded', '🚨 Loaded up', f'money {round(prior["handle_pct"])}% → {round(handle)}% since last refresh'))
+    return tags
 
 
 def split_block(g, splits):
@@ -255,14 +308,73 @@ def split_block(g, splits):
     if not home or not away:
         return ''
     hc, ac = split_colors(g)
+    home_move = home.get('home_line_move')
+
     def row(label, key):
         h = round(home[key])
         a = round(away[key])
         return (f'<div class="split-row"><b>{h}%</b><div class="split-bar">'
                 f'<i style="width:{h}%;background:{hc}"></i><i style="width:{a}%;background:{ac}"></i></div>'
                 f'<b class="r">{a}%</b><span>{label}</span></div>')
+
+    tags = ''.join(
+        f'<div class="money-tag"><em class="mt-{kind}">{label}</em> <b>{esc(g[name])}</b> · {detail}</div>'
+        for split, name, sign in ((home, 'home_name', 1), (away, 'away_name', -1))
+        for kind, label, detail in money_tags(split, None if home_move is None else sign * home_move))
+
     return (f'<div class="split"><div class="split-label">DraftKings splits · {esc(g["home_name"])} vs {esc(g["away_name"])}</div>'
-            f'{row("Handle", "handle_pct")}{row("Bets", "bets_pct")}</div>')
+            f'{row("Handle", "handle_pct")}{row("Bets", "bets_pct")}{tags}</div>')
+
+
+KALSHI_MIN_DOLLARS = 1000   # below this the market is too thin to say anything
+KALSHI_BIG_BET = 10000      # a single trade this size gets the whale
+KALSHI_LEAN = 15            # dollar share this many pts off the win price = money leaning that way
+
+
+def dollars(x):
+    return f'${x / 1e6:.1f}M' if x >= 1e6 else f'${x / 1e3:.0f}k' if x >= 1e4 else f'${x / 1e3:.1f}k' if x >= 1e3 else f'${x:.0f}'
+
+
+def kalshi_block(g, k):
+    """Real dollars traded on each side of Kalshi's winner market (straight-up, not the spread)."""
+    if not k:
+        return ''
+    home_d, away_d = k.get('home_dollars') or 0, k.get('away_dollars') or 0
+    total = home_d + away_d
+    if total < KALSHI_MIN_DOLLARS:
+        return ''
+    hc, ac = split_colors(g)
+    h = round(100 * home_d / total)
+    detail = f'💵 <b>{dollars(total)}</b> bet'
+    day = (k.get('home_dollars_24h') or 0) + (k.get('away_dollars_24h') or 0)
+    if day >= KALSHI_MIN_DOLLARS:
+        day_side = 'home_name' if (k.get('home_dollars_24h') or 0) >= day / 2 else 'away_name'
+        day_pct = round(100 * max(k.get('home_dollars_24h') or 0, k.get('away_dollars_24h') or 0) / day)
+        detail += f' · last 24h {dollars(day)}, {day_pct}% on <b>{esc(g[day_side])}</b>'
+    # Favorites cost more per contract, so dollars pile on them by default. The read is
+    # dollars vs. the price: more of the money on a side than its win chance implies.
+    lean = ''
+    hp, ap = k.get('home_price') or 0, k.get('away_price') or 0
+    if hp + ap > 0:
+        implied = 100 * hp / (hp + ap)
+        fav = 'home_name' if implied >= 50 else 'away_name'
+        detail += f' · priced <b>{esc(g[fav])}</b> {round(max(implied, 100 - implied))}% to win'
+        edge = h - implied
+        # Only on competitive games: lopsided ones draw lottery-ticket money on the long shot.
+        if abs(edge) >= KALSHI_LEAN and 25 <= implied <= 75:
+            side = 'home_name' if edge > 0 else 'away_name'
+            lean = (f'<div class="money-tag"><em class="mt-sharp">🔥 Money lean</em> <b>{esc(g[side])}</b> · '
+                    f'{round(abs(edge))} pts more of the dollars than the odds imply</div>')
+    big = ''
+    if k.get('biggest_side') and (k.get('biggest_dollars') or 0) >= KALSHI_MIN_DOLLARS:
+        icon = '🐋 ' if k['biggest_dollars'] >= KALSHI_BIG_BET else ''
+        big = (f'<div class="money-tag">{icon}Biggest single bet <b>{dollars(k["biggest_dollars"])}</b>'
+               f' on <b>{esc(g[k["biggest_side"] + "_name"])}</b></div>')
+    return (f'<div class="split"><div class="split-label">Kalshi real money · to win the game</div>'
+            f'<div class="split-row"><b>{h}%</b><div class="split-bar">'
+            f'<i style="width:{h}%;background:{hc}"></i><i style="width:{100 - h}%;background:{ac}"></i></div>'
+            f'<b class="r">{100 - h}%</b><span>Dollars</span></div>'
+            f'<div class="money-tag">{detail}</div>{lean}{big}</div>')
 
 
 def _rgb(hex6):
@@ -309,53 +421,72 @@ def _css(rgb):
     return '#%02x%02x%02x' % rgb
 
 
-def matchup_card(g, home_notes, away_notes, home_ats, away_ats, home_rating, away_rating, w, proj, splits=None, season_games=None):
-    season_games = season_games or {}
-    weather_block = weather_alert_block(w)
-    home_side = (f'<div class="home">{team_title(g, "home", None)}{grades_block(home_rating, season_games.get(g["home_id"], 0))}'
+def projection_block(g, proj):
+    if not proj or proj.get('lean_home_spread') is None:
+        return ''
+    line_val = proj['lean_home_spread']
+    label = 'Pick’em' if line_val == 0 else esc(g['home_name'] if line_val < 0 else g['away_name']) + ' ' + spread_text(-abs(line_val))
+    diff = None if g['home_spread'] is None else g['home_spread'] - line_val
+    diff_label = ('Unavailable — no market spread' if diff is None
+                  else f"{half(abs(diff))} pts" + (' · same as market' if diff == 0 else ' toward ' + esc(g['home_name'] if diff > 0 else g['away_name'])))
+    score_line = ''
+    if proj.get('home_points') is not None and proj.get('away_points') is not None:
+        score_line = f'<div class="projected-score">Projected score: {esc(g["home_name"])} {half(proj["home_points"])} · {esc(g["away_name"])} {half(proj["away_points"])}</div>'
+    return (f'<div class="projection"><div><b>Our projected line: {label}</b></div>'
+            f'<div>Difference vs market: {diff_label}</div>{score_line}</div>')
+
+
+def matchup_card(g, home_notes, away_notes, home_rating, away_rating, w, proj, splits, season_games, kalshi=None):
+    home_side = (f'<div class="home">{team_title(g, "home")}{grades_block(home_rating, season_games.get(g["home_id"], 0))}'
                  f'<div class="stadium">{esc(g["venue_name"] or "Venue unavailable")}</div>{weather_text(w, g["indoor"])}'
-                 f'{notes_block(home_notes, ats_text(home_ats))}</div>')
-    away_side = (f'<div class="away">{team_title(g, "away", None)}{grades_block(away_rating, season_games.get(g["away_id"], 0))}'
-                 f'{notes_block(away_notes, ats_text(away_ats))}</div>')
+                 f'{notes_block(home_notes)}</div>')
+    away_side = (f'<div class="away">{team_title(g, "away")}{grades_block(away_rating, season_games.get(g["away_id"], 0))}'
+                 f'{notes_block(away_notes)}</div>')
     status = f' · {esc(g["status"])}' if g['status'] and g['status'] != 'Scheduled' else ''
-    kickoff = g['kickoff']
-    try:
-        kickoff_label = datetime.fromisoformat(kickoff).strftime('%a %-m/%-d %-I:%M %p')
-    except Exception:
-        kickoff_label = kickoff
-    lean = lean_line(dict(proj, home_name=g['home_name'], away_name=g['away_name'],
-                           home_spread=g['home_spread'], away_spread=g['away_spread']) if proj else None)
-    projection_html = ''
-    if proj and proj.get('lean_home_spread') is not None:
-        line_val = proj['lean_home_spread']
-        label = 'Pick’em' if line_val == 0 else esc(g['home_name'] if line_val < 0 else g['away_name']) + ' ' + spread_text(-abs(line_val))
-        diff = None if g['home_spread'] is None else g['home_spread'] - line_val
-        diff_label = ('Unavailable — no market spread' if diff is None
-                       else f"{half(abs(diff))} pts" + (' · same as market' if diff == 0 else ' toward ' + esc(g['home_name'] if diff > 0 else g['away_name'])))
-        score_line = ''
-        if proj.get('home_points') is not None and proj.get('away_points') is not None:
-            score_line = f'<div class="projected-score">Projected score: {esc(g["home_name"])} {half(proj["home_points"])} · {esc(g["away_name"])} {half(proj["away_points"])}</div>'
-        projection_html = (f'<div class="projection"><div><b>Our projected line: {label}</b></div>'
-                            f'<div>Difference vs market: {diff_label}</div>{score_line}</div>')
-    detail = model_detail(g, proj) if proj else ''
     market_source = esc(g['odds_status'] if g['home_spread'] is None else g['market_source'])
-    market = (f'<div class="market"><div class="kickoff">{esc(kickoff_label)}{status}</div>'
-              f'<div class="total">O/U {half(g["total"])}</div>{lean}{projection_html}{detail}'
-              f'{split_block(g, splits)}<div class="market-source">{market_source}</div></div>')
-    return f'<article class="match">{weather_block}{home_side}{market}{away_side}</article>'
+    market = (f'<div class="market"><div class="kickoff"><b>{esc(time_label(g["kickoff"]))}</b>{status}</div>'
+              f'<div class="total">O/U {half(g["total"])}</div>{lean_line(g, proj)}{projection_block(g, proj)}'
+              f'{model_detail(g, proj)}{split_block(g, splits)}{kalshi_block(g, kalshi)}<div class="market-source">{market_source}</div></div>')
+    return f'<article class="match" id="g{esc(g["game_id"])}">{weather_alert_block(w)}{home_side}{market}{away_side}</article>'
 
 
-# tier -> (low score, high score, edge at low score, edge at high score)
-CONFIDENCE_BANDS = {'Low': (1, 3, 1.0, 2.0), 'Moderate': (4, 6, 2.0, 6.0), 'High': (7, 10, 4.0, 10.0)}
+def method_note(games, proj_by_game):
+    """Standing note in place of the old ranked pick list."""
+    scored = [proj_by_game[g['game_id']] for g in games
+              if (proj_by_game.get(g['game_id']) or {}).get('lean_edge_points') is not None]
+    far = sum(1 for p in scored if abs(p['lean_edge_points']) >= 6)
+    tally = (f'{len(scored)} matchups projected · {far} sit 6+ pts off the market'
+             if scored else 'No projections for this week yet')
+    return ('<div class="card"><h2>How to read this page</h2>'
+            f'<p class="muted" style="line-height:1.7">{esc(tally)}. '
+            'Games are listed in kickoff order and are <b>not</b> ranked as picks. '
+            'Measured walk-forward over the 2025–26 seasons, this model does not beat the '
+            "closing line (margin MAE 13.1 against the market's 11.8), and its error grows "
+            'the further it strays from that line. Confidence below rates how much to trust '
+            'the projection, so it <b>falls</b> as the gap to the market widens — a big '
+            'disagreement is a warning, not a signal.</p></div>')
+
+
+# tier -> (low score, high score, gap-to-market at the HIGH score, gap at the LOW score).
+# Note the last two run large-to-small: within every tier the score now falls as the
+# model moves away from the closing line, because that is the direction the measured
+# error runs (10.7 margin MAE inside a point of the close, 17.9 at 10+ points away).
+CONFIDENCE_BANDS = {'High': (7, 10, 3.0, 0.0), 'Moderate': (4, 6, 6.0, 3.0), 'Low': (1, 3, 12.0, 6.0)}
 
 
 def confidence_rating(proj):
+    """1-10 read on how much to trust this projection -- not how good the bet is.
+
+    Inverted 2026-09-20. The old version scored a bigger disagreement with the
+    market as more confidence, which had the sign backwards: distance from the
+    close measures model error, not edge.
+    """
     edge = proj['lean_edge_points'] if proj else None
     if edge is None:
         return None
-    # Edge is signed (negative = away lean); the tier label already folds in sample size, so score within its band.
+    # Edge is signed (negative = away lean); the tier label already folds in sample size.
     lo, hi, e_lo, e_hi = CONFIDENCE_BANDS.get(proj.get('confidence'), CONFIDENCE_BANDS['Low'])
-    frac = (abs(edge) - e_lo) / (e_hi - e_lo)
+    frac = (abs(edge) - e_lo) / (e_hi - e_lo) if e_hi != e_lo else 0.0
     return max(lo, min(hi, int(lo + (hi - lo) * frac + 0.5)))
 
 
@@ -370,70 +501,57 @@ def render_week(season: int, week: int) -> Path:
         combined = {r['team_id']: r['rank'] for r in con.execute(
             'SELECT team_id, rank FROM polls WHERE season=? AND poll_type=?', (season, 'combined')).fetchall()}
         for g in games:
+            venue = json.loads(g['venue_json'] or '{}')
             g['home_combined'] = combined.get(g['home_id'])
             g['away_combined'] = combined.get(g['away_id'])
-            g['indoor'] = json.loads(g['venue_json'] or '{}').get('indoor', False)
-            g['venue_name'] = (json.loads(g['venue_json'] or '{}').get('fullName'))
+            g['indoor'] = venue.get('indoor', False)
+            g['venue_name'] = venue.get('fullName')
         games = [g for g in games if g['home_combined'] or g['away_combined']]
 
-        as_of_row = con.execute('SELECT MAX(as_of_date) AS d FROM team_ratings WHERE season=?', (season,)).fetchone()
-        as_of = as_of_row['d'] if as_of_row else None
-        ratings_by_team = {}
-        power_rows = []
-        if as_of:
-            power_rows = [dict(r) for r in con.execute(
-                'SELECT * FROM team_ratings WHERE season=? AND as_of_date=? AND power_rank IS NOT NULL ORDER BY power_rank',
-                (season, as_of)).fetchall()]
-            for r in power_rows:
-                ratings_by_team[r['team_id']] = r
+        # Latest ratings snapshot: every FBS-rated team gets a grade row; only the combined Top 50 carry a power rank.
+        as_of = con.execute('SELECT MAX(as_of_date) AS d FROM team_ratings WHERE season=?', (season,)).fetchone()['d']
+        rating_rows = [dict(r) for r in con.execute(
+            'SELECT * FROM team_ratings WHERE season=? AND as_of_date=?', (season, as_of)).fetchall()] if as_of else []
+        ratings_by_team = {r['team_id']: r for r in rating_rows}
+        power_rows = sorted((r for r in rating_rows if r['power_rank'] is not None), key=lambda r: r['power_rank'])
         team_names = {r['team_id']: r['name'] for r in con.execute('SELECT team_id, name FROM teams')}
 
         notes_by_game = {}
         for r in con.execute('SELECT * FROM game_notes ORDER BY note_order'):
             notes_by_game.setdefault((r['game_id'], r['side']), []).append(r['note_text'])
-
         weather_by_game = {r['game_id']: dict(r) for r in con.execute('SELECT * FROM weather')}
         proj_by_game = {r['game_id']: dict(r) for r in con.execute('SELECT * FROM projections')}
         splits_by_game = {}
+        kalshi_by_game = {r['game_id']: dict(r) for r in con.execute('SELECT * FROM kalshi')}
+        # Points the spread has moved toward the home team since the first capture.
+        line_span = {}
+        for r in con.execute('SELECT game_id, home_spread FROM line_history WHERE home_spread IS NOT NULL ORDER BY captured_at'):
+            line_span.setdefault(r['game_id'], [r['home_spread']]).append(r['home_spread'])
+        home_line_move = {gid: span[0] - span[-1] for gid, span in line_span.items()}
+        prior_split = {}
+        for r in con.execute('SELECT * FROM splits_history ORDER BY captured_at'):
+            prior_split.setdefault((r['team_key'], r['month_day']), []).append(dict(r))
         for r in con.execute('SELECT * FROM splits WHERE game_id IS NOT NULL'):
-            splits_by_game.setdefault(r['game_id'], []).append(dict(r))
+            s = dict(r)
+            history = prior_split.get((s['team_key'], s['month_day']), [])
+            s['prior'] = history[-2] if len(history) > 1 else None
+            s['home_line_move'] = home_line_move.get(s['game_id'])
+            splits_by_game.setdefault(r['game_id'], []).append(s)
         season_games = {}
         for r in con.execute('SELECT home_id, away_id FROM games WHERE season=? AND completed=1', (season,)):
             for tid in (r['home_id'], r['away_id']):
                 season_games[tid] = season_games.get(tid, 0) + 1
 
-        status_row = con.execute('SELECT MAX(as_of_date) FROM team_ratings').fetchone()
+    cards = ''.join(
+        matchup_card(g, notes_by_game.get((g['game_id'], 'home'), []), notes_by_game.get((g['game_id'], 'away'), []),
+                     ratings_by_team.get(g['home_id']), ratings_by_team.get(g['away_id']),
+                     weather_by_game.get(g['game_id']), proj_by_game.get(g['game_id']),
+                     splits_by_game.get(g['game_id']), season_games,
+                     kalshi_by_game.get(g['game_id']))
+        for g in games) or '<div class="empty">No Top 50 matchups this week.</div>'
 
-    def team_games_for(tid):
-        return [g for g in games if g['home_id'] == tid or g['away_id'] == tid]
-
-    cards = []
-    for g in games:
-        proj = proj_by_game.get(g['game_id'])
-        home_notes = notes_by_game.get((g['game_id'], 'home'), [])
-        away_notes = notes_by_game.get((g['game_id'], 'away'), [])
-        w = weather_by_game.get(g['game_id'])
-        # ATS-record pills (e.g. "6-2-0 ATS") are omitted here: ratings/power.py
-        # doesn't currently persist per-game ATS records to a queryable table.
-        cards.append((g, home_notes, away_notes, None, None, ratings_by_team.get(g['home_id']),
-                      ratings_by_team.get(g['away_id']), w, proj, splits_by_game.get(g['game_id']), season_games))
-
-    top_picks = sorted(
-        [(c[0], c[8]) for c in cards if c[8] and not c[0]['completed'] and c[8].get('lean_side')],
-        key=lambda gp: (confidence_rating(gp[1]) or 0, abs(gp[1].get('lean_edge_points') or 0)), reverse=True)[:5]
-
-    games_html = ''.join(matchup_card(*c) for c in cards) or '<div class="empty">No Top 50 matchups this week.</div>'
-    top_picks_html = ''
-    if top_picks:
-        blocks = []
-        for g, p in top_picks:
-            c = next(c for c in cards if c[0]['game_id'] == g['game_id'])
-            blocks.append(f'<div class="toppick">{matchup_card(*c)}</div>')
-        top_picks_html = '<div class="card"><h2>Top Picks This Week</h2>' + ''.join(blocks) + '</div>'
-
-    power_html = _render_power_table(power_rows, team_names)
-    now = datetime.now().astimezone().isoformat(timespec='seconds')
-
+    now = datetime.now().astimezone()
+    stamp = now.strftime('%b %d, %I:%M %p').replace(' 0', ' ')
     page = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -445,13 +563,14 @@ def render_week(season: int, week: int) -> Path:
 <body>
 <header>
   <div><h1>NCAAF Handicap</h1><p class="tag">SEASON {season} · WEEK {week}</p></div>
-  <div id="source" class="muted">Generated {esc(now)} · {len(games)} Top-50 matchups</div>
+  <div id="source" class="muted">Updated {esc(stamp)} · {len(games)} Top-50 matchups · times in {esc(now.tzname())}</div>
 </header>
-{top_picks_html}
-<div class="card"><h2>This Week</h2><div class="match-list">{games_html}</div></div>
-<div class="card"><h2>Power Ranking</h2>{power_html}</div>
+{method_note(games, proj_by_game)}
+<div class="card"><h2>This Week</h2><div class="match-list">{cards}</div></div>
+<div class="card"><h2>Power Ranking</h2>{_render_power_table(power_rows, team_names)}</div>
 <footer class="muted" style="font-size:11px;margin-top:24px;line-height:1.7">
-  Confidence is a qualitative label, not a calibrated cover probability. See README.md for the full model methodology.
+  Confidence rates trust in the projection, not the quality of a bet, and is not a calibrated cover
+  probability. This model has not beaten the closing line in walk-forward testing. See README.md.
 </footer>
 </body>
 </html>

@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from common import CBS, ESPN, clean, fetch_json, fetch_text, normal
+from common import CBS, ESPN, clean, fbs_key, fetch_json, fetch_text, normal
 from db.db import connect
 
 
@@ -69,12 +69,12 @@ def ingest(season: int) -> dict:
 
     top50 = composite_teams(team_rows, cbs, ap, coaches)
     # CBS's keys are themselves sometimes abbreviated ('missstate'); canonicalize
-    # through the alias map before comparing against ESPN-side team names.
-    fbs_names = {_fbs_alias(k) for k in cbs}
+    # through the shared alias map before comparing against ESPN-side team names.
+    fbs_names = {fbs_key(k) for k in cbs}
 
     with connect() as con:
         for row in team_rows:
-            is_fbs = 1 if (not fbs_names) or _fbs_alias(normal(row['name'])) in fbs_names else 0
+            is_fbs = 1 if (not fbs_names) or fbs_key(row['name']) in fbs_names else 0
             con.execute('UPDATE teams SET fbs=? WHERE team_id=?', (is_fbs, row['id']))
         for team_id, rank in cbs_by_id(team_rows, cbs).items():
             _upsert_poll(con, team_id, season, 'cbs', rank, now)
@@ -95,18 +95,6 @@ def cbs_by_id(team_rows, cbs):
         if rank is not None:
             out[row['id']] = rank
     return out
-
-
-# CBS's abbreviated school names, so the FBS-membership check doesn't miss
-# teams CBS spells differently than ESPN. Ported from power.py's FBS_ALIASES.
-_FBS_ALIASES = dict(zip(
-    'missstate ndakotast iowast sandiegost michiganst wmichigan coloradost washingtonst gasouthern jacksonvillest arkansasst appst fresnost texasst utahst kennesawst fau ccarolina fiu newmexicost somiss emichigan cmichigan georgiast sacramentost missourist middletenn kentst ballst sanjosstate'.split(),
-    'mississippistate northdakotastate iowastate sandiegostate michiganstate westernmichigan coloradostate washingtonstate georgiasouthern jacksonvillestate arkansasstate appalachianstate fresnostate texasstate utahstate kennesawstate floridaatlantic coastalcarolina floridainternational newmexicostate southernmiss easternmichigan centralmichigan georgiastate sacramentostate missouristate middletennessee kentstate ballstate sanjosestate'.split()))
-_FBS_ALIASES.update(fiu='floridainternational', newmexicost='newmexicostate', somiss='southernmiss')
-
-
-def _fbs_alias(key: str) -> str:
-    return _FBS_ALIASES.get(key, key)
 
 
 def _upsert_poll(con, team_id, season, poll_type, rank, now):

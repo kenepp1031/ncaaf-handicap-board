@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # Atomic-write temporaries
 *.tmp
@@ -11,5 +12,5 @@ __pycache__/
 # copy ncaaf_handicap.db somewhere outside the repo rather than committing it.
 ncaaf_handicap.db
 
-# Raw scrape caches (cached_fetch()'s on-disk copies) — refetchable.
-cache/
+# Database backups taken before destructive migrations.
+ncaaf_handicap.db.bak-*
