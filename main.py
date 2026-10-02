@@ -20,8 +20,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from db.db import init_db, connect
 from ingest import espn_scoreboard, rankings, cbs_odds, dk_lines, kalshi, weather as weather_ingest
-from ingest import nil_spending, talent as talent_ingest, officiating as officiating_ingest
-from ratings import power
+from ingest import nil_spending, talent as talent_ingest, officiating as officiating_ingest, box_scores
+from ingest import plays as plays_ingest, injuries as injuries_ingest, transfers as transfers_ingest
+from ratings import power, sharp_side
 from backtest.log_results import log_season
 from dashboard.render import render_week
 
@@ -107,12 +108,38 @@ def weekly_run(season: int, week: int, skip_scrape: bool = False) -> Path:
             officiating_ingest.ingest()
         except Exception as e:
             print(f'  officiating refresh failed: {e}')
+        try:
+            box_scores.ingest()
+        except Exception as e:
+            print(f'  box score refresh failed: {e}')
+        try:
+            plays_ingest.ingest()
+        except Exception as e:
+            print(f'  play-by-play refresh failed: {e}')
+        try:
+            r = injuries_ingest.ingest()
+            if r.get('unmatched_teams'):
+                print(f"  injuries: covers.com teams not matched to FBS: {r['unmatched_teams']}")
+        except Exception as e:
+            print(f'  injury report refresh failed: {e}')
+        try:
+            r = transfers_ingest.ingest(season)
+            if r.get('unmatched_teams'):
+                print(f"  transfers: FBS teams without a 247Sports slug: {r['unmatched_teams']}")
+        except Exception as e:
+            print(f'  transfer portal refresh failed: {e}')
 
     print('Fitting ratings model...')
     result = power.build(season, date.today())
     print(f"  {result['status']}")
 
     log_season(season)
+    try:
+        s = sharp_side.update(season)
+        if s['added']:
+            print(f"  sharp side: {s['added']} new pick(s) logged")
+    except Exception as e:
+        print(f'  sharp side update failed: {e}')
     return render_week(season, week)
 
 

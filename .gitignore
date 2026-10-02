@@ -14,3 +14,6 @@ ncaaf_handicap.db
 
 # Database backups taken before destructive migrations.
 ncaaf_handicap.db.bak-*
+
+# Scheduled-task output (scripts/daily_update.ps1). Rotated after 30 days.
+logs/

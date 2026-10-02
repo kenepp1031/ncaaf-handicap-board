@@ -172,6 +172,86 @@ CREATE TABLE IF NOT EXISTS officiating_penalties (
     captured_at TEXT NOT NULL
 );
 
+-- Per-team box score from ESPN's game summary. One row per (game, side);
+-- a finished game's box never changes, so ingest.box_scores only fetches misses.
+CREATE TABLE IF NOT EXISTS box_scores (
+    game_id TEXT NOT NULL,
+    side TEXT NOT NULL,             -- 'home' | 'away'
+    team_id TEXT NOT NULL,
+    plays INTEGER,                  -- pass attempts + rush attempts (sacks count as rushes in CFB)
+    total_yards INTEGER,
+    pass_attempts INTEGER,
+    rush_attempts INTEGER,
+    first_downs INTEGER,
+    third_down_conv INTEGER,
+    third_down_att INTEGER,
+    turnovers INTEGER,
+    possession_seconds INTEGER,
+    qb_id TEXT,                     -- player with the most pass attempts
+    qb_name TEXT,
+    qb_attempts INTEGER,
+    captured_at TEXT NOT NULL,
+    PRIMARY KEY (game_id, side)
+);
+CREATE INDEX IF NOT EXISTS idx_box_scores_team ON box_scores(team_id);
+
+-- Per-team play-by-play efficiency from the same ESPN summary (drives -> plays).
+-- One row per (game, side). "ng" columns exclude garbage time (lead over 38 in
+-- the 2nd quarter, 28 in the 3rd, 22 in the 4th). Permanent cache, misses only.
+CREATE TABLE IF NOT EXISTS play_stats (
+    game_id TEXT NOT NULL,
+    side TEXT NOT NULL,             -- 'home' | 'away'
+    team_id TEXT NOT NULL,
+    plays INTEGER,                  -- scrimmage plays (rush, pass, sack); no kicks/penalties
+    yards INTEGER,
+    successes INTEGER,              -- 50% of distance on 1st, 70% on 2nd, all of it on 3rd/4th
+    explosives INTEGER,             -- rush 12+ or pass 16+
+    turnovers INTEGER,
+    rush_plays INTEGER,
+    rush_yards INTEGER,
+    rush_successes INTEGER,
+    pass_plays INTEGER,
+    pass_yards INTEGER,
+    pass_successes INTEGER,
+    plays_ng INTEGER,
+    yards_ng INTEGER,
+    successes_ng INTEGER,
+    explosives_ng INTEGER,
+    turnovers_ng INTEGER,
+    drives INTEGER,
+    drive_points INTEGER,           -- points scored by this offense on its drives (TD 7, FG 3)
+    captured_at TEXT NOT NULL,
+    PRIMARY KEY (game_id, side)
+);
+CREATE INDEX IF NOT EXISTS idx_play_stats_team ON play_stats(team_id);
+
+-- covers.com injury report. `injuries` is the current snapshot (replaced each
+-- run); `injury_history` appends a row whenever a player's status or date changes,
+-- so a game can be judged on what was listed before it kicked off.
+CREATE TABLE IF NOT EXISTS injuries (
+    team_id TEXT NOT NULL,
+    player TEXT NOT NULL,           -- as listed: "J. Sayin"
+    pos TEXT,
+    status TEXT,                    -- Out | Doubtful | Questionable | Probable | Day-To-Day ...
+    injury TEXT,
+    reported TEXT,                  -- covers' date text, "Sun, Sep 27"
+    note TEXT,
+    captured_at TEXT NOT NULL,
+    PRIMARY KEY (team_id, player)
+);
+CREATE TABLE IF NOT EXISTS injury_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id TEXT NOT NULL,
+    player TEXT NOT NULL,
+    pos TEXT,
+    status TEXT,
+    injury TEXT,
+    reported TEXT,
+    note TEXT,
+    captured_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_injury_history_team ON injury_history(team_id, captured_at);
+
 CREATE TABLE IF NOT EXISTS team_ratings (
     team_id TEXT NOT NULL,
     season INTEGER NOT NULL,
@@ -221,6 +301,8 @@ CREATE TABLE IF NOT EXISTS projections (
     spend_margin_shift REAL,
     officiating_margin_shift REAL,
     talent_margin_shift REAL,
+    manual_margin_shift REAL,       -- your hand (manual_adjustments.csv): home nudge minus away nudge, in points
+    injury_margin_shift REAL,       -- starting-QB injury prior (ratings/injury_prior.py), points toward home
     pooled_fcs_json TEXT,           -- which side(s), if any, resolved to the pooled FCS identity
     generated_at TEXT
 );
@@ -244,6 +326,8 @@ CREATE TABLE IF NOT EXISTS projection_snapshots (
     confidence TEXT,
     market_home_spread REAL,   -- the line on the board when this snapshot was taken
     pooled_fcs_json TEXT,
+    manual_margin_shift REAL,  -- points of your hand inside fair/lean (0 = model alone); lets the grader score both
+    injury_margin_shift REAL,  -- points of the QB-injury prior inside fair/lean
     PRIMARY KEY (game_id, generated_at)
 );
 CREATE INDEX IF NOT EXISTS idx_proj_snap_game ON projection_snapshots(game_id, generated_at);
@@ -264,5 +348,52 @@ CREATE TABLE IF NOT EXISTS backtest_log (
     graded_spread REAL,   -- the number actually bet (lean_home_spread), not the raw model line
     edge_points REAL,     -- graded_spread vs closing_spread; the bucket this pick belongs in
     pooled_fcs INTEGER NOT NULL DEFAULT 0,  -- 1 = an FCS side was pooled; excluded from headline accuracy
-    generated_at TEXT     -- when the graded forecast was made (always < kickoff)
+    generated_at TEXT,    -- when the graded forecast was made (always < kickoff)
+    manual_margin_shift REAL,   -- your hand inside graded_spread; report.py scores the pick with and without it
+    ats_result_model TEXT,      -- ATS result the model alone would have had (same as ats_result when no hand)
+    injury_margin_shift REAL    -- QB-injury prior inside graded_spread; report.py scores with and without it too
+);
+
+-- "Sharp side" log: a game/side is written the first run it qualifies (DraftKings
+-- money share beats ticket share by SHARP_GAP or more) with the line on the board at
+-- that moment, and is never deleted, so the record is what you could actually have bet.
+CREATE TABLE IF NOT EXISTS sharp_picks (
+    game_id TEXT NOT NULL,
+    side TEXT NOT NULL,             -- 'home' | 'away'
+    season INTEGER,
+    week INTEGER,
+    first_seen TEXT NOT NULL,       -- when it first qualified
+    spread_at_pick REAL,            -- that side's spread when first seen (negative = favorite)
+    handle_pct REAL,                -- money share at first sighting
+    bets_pct REAL,                  -- ticket share at first sighting
+    gap REAL,                       -- handle - bets at first sighting
+    line_move REAL,                 -- points the line had moved toward this side by first sighting
+    model_agrees INTEGER,           -- 1 if the model lean (1+ pt) was on the same side
+    last_handle_pct REAL,           -- latest capture, for display
+    last_bets_pct REAL,
+    still_qualifies INTEGER NOT NULL DEFAULT 1,
+    closing_spread REAL,            -- this side's closing spread, filled at grading
+    ats_result TEXT,                -- win | loss | push vs the closing line
+    ats_result_at_pick TEXT,        -- vs the line at first sighting
+    su_result TEXT,                 -- win | loss
+    PRIMARY KEY (game_id, side)
+);
+
+-- 247Sports transfer portal, per player, from each FBS team's portal page.
+-- direction 'in' = joined this team, 'out' = left it. Refreshed weekly.
+CREATE TABLE IF NOT EXISTS transfers (
+    season INTEGER NOT NULL,
+    team_id TEXT NOT NULL,
+    direction TEXT NOT NULL,        -- 'in' | 'out'
+    player_key INTEGER NOT NULL,    -- 247Sports player key
+    player TEXT,
+    pos TEXT,
+    rating REAL,                    -- 247 composite (transfer rating when given, else high-school)
+    stars INTEGER,
+    status TEXT,                    -- Enrolled | Committed | Entered | ...
+    from_school TEXT,
+    to_school TEXT,
+    transfer_date TEXT,
+    captured_at TEXT NOT NULL,
+    PRIMARY KEY (season, team_id, direction, player_key)
 );

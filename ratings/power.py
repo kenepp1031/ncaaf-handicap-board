@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from common import HOSTILE_ENVIRONMENTS, POOLED_FCS, RIVALRIES, fbs_key, normal
 from db.db import connect
 from ratings.handicap_model import Model
-from ratings import nil_prior, officiating_prior, talent_prior
+from ratings import injury_prior, manual, nil_prior, officiating_prior, talent_prior
 
 # Chosen by walk-forward test — see README/CHANGELOG. Do not retune casually.
 MODEL_RIDGE = 1.5
@@ -267,6 +267,13 @@ def build(season: int, as_of: date, use_priors: bool = True) -> dict:
         spend_fit = nil_prior.fit(spend, ratings, names) if spend else None
         off_fit = officiating_prior.fit(ratings, off_rates) if off_rates else None
         talent_fit = talent_prior.fit(talent, ratings, names) if talent else None
+        # Your hand: manual_adjustments.csv. Applied after the model and the priors,
+        # and stored on its own so the record can be graded with and without it.
+        hand = manual.load(as_of, names)
+        for bad in hand['unmatched']:
+            print(f'  manual_adjustments.csv: no FBS team matches {bad!r} -- row ignored')
+        # Starting-QB injuries (covers.com list joined to the box-score starter).
+        injuries = injury_prior.load(season) if use_priors else {}
 
         season_games = {}
         for x in events:
@@ -343,6 +350,10 @@ def build(season: int, as_of: date, use_priors: bool = True) -> dict:
                 home_notes.append(rivalry)
                 away_notes.append(rivalry)
             for side, tid, notes in (('home', hid, home_notes), ('away', aid, away_notes)):
+                if not e.get('completed') and injury_prior.in_horizon(e['game_date'], as_of):
+                    qb_note = injury_prior.team_note(injuries, tid)
+                    if qb_note:
+                        notes.insert(0, qb_note)
                 recent = [x for x in team_games(tid) if x.get('completed') and x['game_date'] < min(e['game_date'], as_of.isoformat())]
                 if recent:
                     recent.sort(key=lambda x: x['game_date'])
@@ -372,7 +383,10 @@ def build(season: int, as_of: date, use_priors: bool = True) -> dict:
                 talent_shift = talent_prior.margin_shift(talent_fit, home_talent if home_model == hid else None,
                                                           away_talent if away_model == aid else None, hr['rating'], ar['rating'],
                                                           season_games.get(hid, 0), season_games.get(aid, 0)) if talent_fit else 0.0
-                total_shift = margin_shift + off_shift + talent_shift
+                manual_shift = manual.margin_shift(hand, hid, aid)
+                injury_shift = (injury_prior.margin_shift(injuries, hid, aid)
+                                if not e.get('completed') and injury_prior.in_horizon(e['game_date'], as_of) else 0.0)
+                total_shift = margin_shift + off_shift + talent_shift + manual_shift + injury_shift
                 hp, ap = model.predict({'home_team': home_model, 'away_team': away_model, 'neutral': bool(e.get('neutral')),
                                          'home_adjustment': total_shift / 2, 'away_adjustment': -total_shift / 2})
                 fair_home_spread = round(ap - hp, 2)
@@ -405,6 +419,7 @@ def build(season: int, as_of: date, use_priors: bool = True) -> dict:
                                               f'moves away from the market — measured walk-forward, that distance tracks '
                                               f'model error, not edge. Not a cover probability.'),
                         'spend_margin_shift': margin_shift, 'officiating_margin_shift': off_shift, 'talent_margin_shift': talent_shift,
+                        'manual_margin_shift': manual_shift, 'injury_margin_shift': injury_shift,
                         'pooled_fcs_json': json.dumps(pooled_fcs)}
             else:
                 proj = {'lean_source': 'unavailable', 'confidence': 'Unavailable', 'lean_side': None}
@@ -427,8 +442,16 @@ def build(season: int, as_of: date, use_priors: bool = True) -> dict:
     fit_count = len(completed_rows)
     fcs = ratings.get(POOLED_FCS)
     status = build_status(fit_count, spend_fit, off_fit, talent_fit, fcs, scope)
+    if hand['by_team']:
+        status += (f" {len(hand['by_team'])} team(s) carry a manual adjustment from manual_adjustments.csv; "
+                   "the record is graded with and without it.")
+    qb_out = [t for t, h in injuries.items() if h['points']]
+    if qb_out:
+        status += (f" {len(qb_out)} team(s) have their starting QB listed Out or Doubtful on covers.com and are "
+                   f"docked up to {injury_prior.QB_OUT_POINTS:g} points; that shift is also graded with and without.")
     return {'as_of': as_of.isoformat(), 'season': season, 'fit_games': fit_count, 'teams_rated': len(ratings),
-            'games_projected': len(events), 'status': status}
+            'games_projected': len(events), 'status': status, 'manual_teams': len(hand['by_team']),
+            'manual_unmatched': hand['unmatched'], 'qb_out_teams': len(qb_out)}
 
 
 def _store_notes(con, game_id, side, notes):
@@ -456,13 +479,15 @@ def _store_snapshot(con, game_id, event, proj):
     con.execute(
         """INSERT INTO projection_snapshots (game_id, generated_at, kickoff, fair_home_spread,
                 lean_home_spread, projected_total, lean_side, lean_edge_points, home_edge_points,
-                sample_games, confidence, market_home_spread, pooled_fcs_json)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                sample_games, confidence, market_home_spread, pooled_fcs_json, manual_margin_shift,
+                injury_margin_shift)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(game_id, generated_at) DO NOTHING""",
         (game_id, now, event.get('kickoff'), proj.get('fair_home_spread'), proj.get('lean_home_spread'),
          proj.get('projected_total'), proj.get('lean_side'), proj.get('lean_edge_points'),
          proj.get('home_edge_points'), proj.get('sample_games'), proj.get('confidence'),
-         event.get('home_spread'), proj.get('pooled_fcs_json')))
+         event.get('home_spread'), proj.get('pooled_fcs_json'), proj.get('manual_margin_shift') or 0.0,
+         proj.get('injury_margin_shift') or 0.0))
 
 
 def _store_projection(con, game_id, proj):
@@ -471,9 +496,10 @@ def _store_projection(con, game_id, proj):
         """INSERT INTO projections (game_id, home_points, away_points, fair_home_spread, projected_total,
                 lean_home_spread, lean_source, lean_side, home_edge_points, lean_edge_points, total_edge_points,
                 sample_games, confidence, confidence_detail, spend_margin_shift, officiating_margin_shift,
-                talent_margin_shift, pooled_fcs_json, generated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                talent_margin_shift, pooled_fcs_json, generated_at, manual_margin_shift, injury_margin_shift)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(game_id) DO UPDATE SET
+                manual_margin_shift=excluded.manual_margin_shift, injury_margin_shift=excluded.injury_margin_shift,
                 home_points=excluded.home_points, away_points=excluded.away_points,
                 fair_home_spread=excluded.fair_home_spread, projected_total=excluded.projected_total,
                 lean_home_spread=excluded.lean_home_spread, lean_source=excluded.lean_source,
@@ -488,7 +514,7 @@ def _store_projection(con, game_id, proj):
          proj.get('home_edge_points'), proj.get('lean_edge_points'), proj.get('total_edge_points'),
          proj.get('sample_games'), proj.get('confidence'), proj.get('confidence_detail'),
          proj.get('spend_margin_shift'), proj.get('officiating_margin_shift'), proj.get('talent_margin_shift'),
-         proj.get('pooled_fcs_json'), now))
+         proj.get('pooled_fcs_json'), now, proj.get('manual_margin_shift') or 0.0, proj.get('injury_margin_shift') or 0.0))
 
 
 def build_status(fit_count, spend_fit, off_fit, talent_fit, fcs, scope):

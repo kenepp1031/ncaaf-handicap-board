@@ -95,6 +95,56 @@ def market_comparison(season: int | None = None) -> dict:
             'model_beats_market_by': round(mk - mo, 2)}
 
 
+def qb_injury_prior(season: int | None = None) -> dict:
+    """Games where the starting-QB injury prior moved the number: the published pick
+    against the same pick with that shift removed. A +q shift toward the home team made
+    the home spread q more negative, so the no-prior number is graded + q."""
+    from backtest.log_results import _ats_result
+    q = """SELECT b.graded_spread, b.closing_spread, b.injury_margin_shift, b.ats_result, g.home_score, g.away_score
+           FROM backtest_log b JOIN games g USING(game_id)
+           WHERE b.pooled_fcs=0 AND b.injury_margin_shift IS NOT NULL AND b.injury_margin_shift != 0"""
+    params = []
+    if season is not None:
+        q += ' AND b.season=?'
+        params.append(season)
+    with connect() as con:
+        rows = [dict(r) for r in con.execute(q, params)]
+    with_prior = [r['ats_result'] for r in rows if r['ats_result']]
+    without, flipped = [], 0
+    for r in rows:
+        if r['graded_spread'] is None or r['closing_spread'] is None:
+            continue
+        alt = _ats_result(round(r['graded_spread'] + r['injury_margin_shift'], 2), r['closing_spread'],
+                          r['home_score'], r['away_score'])[0]
+        if alt:
+            without.append(alt)
+        if alt and r['ats_result'] and alt != r['ats_result']:
+            flipped += 1
+
+    def rec(res):
+        return f"{res.count('win')}-{res.count('loss')}-{res.count('push')}"
+    return {'games_touched': len(rows), 'with_prior': rec(with_prior), 'without_prior': rec(without),
+            'picks_changed_by_prior': flipped,
+            'avg_points_moved': round(sum(abs(r['injury_margin_shift']) for r in rows) / len(rows), 2) if rows else None}
+
+
+def your_hand(season: int | None = None) -> dict:
+    """Games where manual_adjustments.csv moved the number: the pick as published
+    (with your hand) against what the model alone would have picked, on the same
+    games. If 'with' is not beating 'model_alone' over a real sample, the nudges
+    are not helping."""
+    rows = [r for r in _fetch(season, pooled=False) if r.get('manual_margin_shift')]
+    with_hand = [r['ats_result'] for r in rows if r['ats_result']]
+    alone = [r['ats_result_model'] for r in rows if r['ats_result_model']]
+    flipped = sum(1 for r in rows if r['ats_result'] and r['ats_result_model'] and r['ats_result'] != r['ats_result_model'])
+
+    def rec(res):
+        return f"{res.count('win')}-{res.count('loss')}-{res.count('push')}"
+    return {'games_touched': len(rows), 'with_your_hand': rec(with_hand), 'model_alone': rec(alone),
+            'picks_changed_by_your_hand': flipped,
+            'avg_points_moved': round(sum(abs(r['manual_margin_shift']) for r in rows) / len(rows), 2) if rows else None}
+
+
 def per_adjustment_breakdown(season: int | None = None) -> dict:
     """Spread MAE on games where each prior fired (non-zero) vs. didn't."""
     query = """SELECT b.error_spread, p.spend_margin_shift, p.officiating_margin_shift, p.talent_margin_shift
@@ -129,5 +179,7 @@ if __name__ == '__main__':
         'by_edge': by_edge(a.season),
         'by_confidence': by_confidence(a.season),
         'pooled_fcs_games': pooled_fcs_record(a.season),
+        'your_hand': your_hand(a.season),
+        'qb_injury_prior': qb_injury_prior(a.season),
         'by_adjustment': per_adjustment_breakdown(a.season),
     }, indent=2))

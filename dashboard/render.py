@@ -23,6 +23,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from common import normal
 from db.db import connect
+from ratings import injury_prior, manual, sharp_side
+from ingest import transfers as transfers_ingest
 
 OUT_PATH = Path(__file__).resolve().parent / "dashboard.html"
 
@@ -81,6 +83,15 @@ details summary{cursor:pointer;font-weight:600}
 .model-detail>div{margin-top:6px}.model-detail b{color:var(--ink)}.model-detail small{display:block;color:var(--muted2);font-size:10px}
 .weather-alert{grid-column:1/-1;background:var(--loss);color:#fff;font-weight:700;font-size:13px;padding:9px 14px;border-radius:6px;margin-bottom:14px}
 .grades{font-size:13px;line-height:1.7;margin:10px 0}.grades b{color:var(--tag)}.grades small{display:block;color:var(--muted);font-size:10px}
+.yardage{font-size:11px;color:var(--muted);line-height:1.7;margin:-4px 0 10px}.yardage b{color:var(--ink)}.yardage i{font-style:normal;color:var(--muted2)}
+.yardage small{display:block;color:var(--muted2);font-size:10px}
+.note.qb{background:#2a1430;color:#f0a8ff}
+.note.qbout{background:#3a1216;color:#ff9aa2}
+.roster{font-size:11px;color:var(--muted);line-height:1.7;margin:-4px 0 10px}.roster b{color:var(--ink)}.roster i{font-style:normal;color:var(--muted2)}
+.roster .out{color:var(--loss)}.roster .q{color:var(--note-fg)}.roster small{display:block;color:var(--muted2);font-size:10px}
+.away .roster{text-align:right}
+.sharp td b{color:var(--ink)}.sharp .strong td:nth-child(2){color:var(--win);font-weight:700}
+.sharp .done{opacity:.75}.sharp-rec{font-size:13px;color:var(--muted);margin:-6px 0 12px;line-height:1.7}.sharp-rec b{color:var(--ink)}
 .model-lean{font-size:13px;margin:8px 0;line-height:1.6}
 .projection{font-size:11px;color:var(--muted);margin:8px 0 10px;line-height:1.7}.projection b{color:var(--ink)}
 .projected-score{font-size:10px;margin-top:4px}
@@ -165,8 +176,220 @@ def grades_block(rating_row, season_games=0):
 def notes_block(notes):
     if not notes:
         return ''
-    pills = ''.join(f'<span class="note">{esc(n)}</span>' for n in notes)
+    def cls(n):
+        if n.startswith('QB out'):
+            return ' qbout'
+        if n.startswith('QB '):
+            return ' qb'
+        return ''
+    pills = ''.join(f'<span class="note{cls(n)}">{esc(n)}</span>' for n in notes)
     return f'<div class="notes">{pills}</div>'
+
+
+def season_plays(con, season):
+    """Per-team per-game efficiency from play_stats (garbage time stripped), with the
+    opponent's numbers from the same game as the 'allowed' side."""
+    rows = con.execute(
+        """SELECT p.*, g.game_date FROM play_stats p JOIN games g USING(game_id)
+           WHERE g.season=? AND g.completed=1""", (season,)).fetchall()
+    by_game = {}
+    for r in rows:
+        by_game.setdefault(r['game_id'], {})[r['side']] = dict(r)
+    logs = {}
+    for sides in by_game.values():
+        if len(sides) != 2:
+            continue
+        for side, other in (('home', 'away'), ('away', 'home')):
+            me, opp = sides[side], sides[other]
+            logs.setdefault(me['team_id'], []).append({'me': me, 'opp': opp})
+    return logs
+
+
+def efficiency_summary(log):
+    if not log:
+        return None
+    def rate(key, num, den):
+        n = sum(x[key][num] or 0 for x in log)
+        d = sum(x[key][den] or 0 for x in log)
+        return n / d if d else None
+    return {'games': len(log),
+            'sr': rate('me', 'successes_ng', 'plays_ng'), 'sr_allowed': rate('opp', 'successes_ng', 'plays_ng'),
+            'ypp': rate('me', 'yards_ng', 'plays_ng'), 'ypp_allowed': rate('opp', 'yards_ng', 'plays_ng'),
+            'expl': rate('me', 'explosives_ng', 'plays_ng'), 'expl_allowed': rate('opp', 'explosives_ng', 'plays_ng'),
+            'ppd': rate('me', 'drive_points', 'drives'), 'ppd_allowed': rate('opp', 'drive_points', 'drives')}
+
+
+def efficiency_ranks(summaries, fbs_ids):
+    pool = {t: s for t, s in summaries.items() if t in fbs_ids and s}
+    ranks = {t: {} for t in pool}
+    for key, best_high in (('sr', True), ('sr_allowed', False), ('ypp', True), ('ypp_allowed', False),
+                           ('expl', True), ('expl_allowed', False), ('ppd', True), ('ppd_allowed', False)):
+        values = [s[key] for s in pool.values() if s[key] is not None]
+        for t, s in pool.items():
+            if s[key] is not None:
+                ranks[t][key] = 1 + sum(v > s[key] if best_high else v < s[key] for v in values)
+    return ranks, len(pool)
+
+
+def efficiency_block(summary, ranks, population):
+    """Per-play quality, garbage time removed. Display only: walk-forward on 2026-10-02
+    an efficiency training target did not beat the final score (README)."""
+    if not summary or summary['sr'] is None:
+        return ''
+
+    def rk(key):
+        r = ranks.get(key)
+        return f' <i>#{r}</i>' if r else ''
+
+    def pct(v):
+        return '—' if v is None else f'{100 * v:.0f}%'
+
+    return (f'<div class="yardage">Success rate <b>{pct(summary["sr"])}</b>{rk("sr")} · '
+            f'allowed <b>{pct(summary["sr_allowed"])}</b>{rk("sr_allowed")}<br>'
+            f'Explosive plays <b>{pct(summary["expl"])}</b>{rk("expl")} · '
+            f'allowed <b>{pct(summary["expl_allowed"])}</b>{rk("expl_allowed")}<br>'
+            f'Points/drive <b>{summary["ppd"]:.2f}</b>{rk("ppd")} · '
+            f'allowed <b>{summary["ppd_allowed"]:.2f}</b>{rk("ppd_allowed")}'
+            f'<small>Per play, garbage time removed · {summary["games"]} games'
+            f'{f" · # = rank of {population} FBS" if ranks else ""}</small></div>')
+
+
+def injuries_by_team(con):
+    out = {}
+    for r in con.execute('SELECT * FROM injuries ORDER BY CASE status WHEN "Out" THEN 0 WHEN "Doubtful" THEN 1 ELSE 2 END, pos'):
+        out.setdefault(r['team_id'], []).append(dict(r))
+    return out
+
+
+def roster_block(team_injuries, portal, qb_hit):
+    """Who is hurt (covers.com) and what the portal did to the roster (247Sports)."""
+    parts = []
+    if team_injuries:
+        out = [i for i in team_injuries if (i['status'] or '').lower() in ('out', 'doubtful', 'out for season', 'injured reserve')]
+        quest = [i for i in team_injuries if i not in out]
+
+        def names(items, limit=4):
+            shown = ', '.join(f"{esc(i['pos'])} {esc(i['player'])}" for i in items[:limit])
+            return shown + (f' +{len(items) - limit} more' if len(items) > limit else '')
+        line = []
+        if out:
+            line.append(f'<span class="out">Out/doubtful {len(out)}</span>: {names(out)}')
+        if quest:
+            line.append(f'<span class="q">Questionable {len(quest)}</span>: {names(quest, 3)}')
+        title = ' | '.join(f"{i['player']} ({i['pos']}) {i['status']}{(' - ' + i['injury']) if i['injury'] else ''}" for i in team_injuries)
+        parts.append(f'<div title="{esc(title)}">{" · ".join(line)}</div>')
+    if portal:
+        def top(items):
+            return ', '.join(f"{esc(x['pos'])} {esc(x['player'])} {x['rating']:.2f}" for x in items)
+        title = f"In: {top(portal['in_top'])} | Out: {top(portal['out_top'])}"
+        net = portal['net_rating']
+        net_cls = 'win' if net > 0.5 else ('loss' if net < -0.5 else '')
+        parts.append(f'<div title="{esc(title)}">Portal <b>{portal["in_n"]} in</b>'
+                     f'{f" (avg {portal['in_avg']:.2f})" if portal["in_avg"] else ""} · <b>{portal["out_n"]} out</b>'
+                     f'{f" (avg {portal['out_avg']:.2f})" if portal["out_avg"] else ""} · net <b class="{net_cls}">{net:+.1f}</b></div>')
+    if not parts:
+        return ''
+    foot = ('Injuries from covers.com; portal from 247Sports (net = rating weight above 0.80 gained minus lost). '
+            'Only a starting QB listed Out or Doubtful moves the number.')
+    return f'<div class="roster">{"".join(parts)}<small>{foot}</small></div>'
+
+
+def season_box(con, season):
+    """Per-team game log from box_scores for this season, oldest first. Context only --
+    walk-forward (2026-09-26) found yards per play and turnovers added nothing to the
+    model's margin projections, so none of this feeds the rating."""
+    rows = con.execute(
+        """SELECT b.game_id, b.side, b.team_id, b.plays, b.total_yards, b.turnovers, b.qb_id, b.qb_name,
+                  g.game_date, g.home_id, g.away_id
+           FROM box_scores b JOIN games g USING(game_id) WHERE g.season=? AND g.completed=1""", (season,)).fetchall()
+    by_game = {}
+    for r in rows:
+        by_game.setdefault(r['game_id'], {})[r['side']] = dict(r)
+    logs = {}
+    for sides in by_game.values():
+        if len(sides) != 2:
+            continue
+        for side, other in (('home', 'away'), ('away', 'home')):
+            me, opp = sides[side], sides[other]
+            logs.setdefault(me['team_id'], []).append({
+                'date': me['game_date'], 'opp_id': opp['team_id'], 'yards': me['total_yards'], 'plays': me['plays'],
+                'yards_allowed': opp['total_yards'], 'plays_allowed': opp['plays'],
+                'lost': me['turnovers'], 'gained': opp['turnovers'], 'qb_id': me['qb_id'], 'qb_name': me['qb_name']})
+    for log in logs.values():
+        log.sort(key=lambda x: x['date'])
+    return logs
+
+
+def _ratio(log, num, den):
+    n = sum(x[num] for x in log if x[num] is not None and x[den])
+    d = sum(x[den] for x in log if x[num] is not None and x[den])
+    return n / d if d else None
+
+
+def yardage_summary(log):
+    if not log:
+        return None
+    games = [x for x in log if x['yards'] is not None and x['yards_allowed'] is not None]
+    if not games:
+        return None
+    return {'games': len(games),
+            'ypg': sum(x['yards'] for x in games) / len(games),
+            'ypg_allowed': sum(x['yards_allowed'] for x in games) / len(games),
+            'ypp': _ratio(games, 'yards', 'plays'), 'ypp_allowed': _ratio(games, 'yards_allowed', 'plays_allowed'),
+            'gained': sum(x['gained'] or 0 for x in games), 'lost': sum(x['lost'] or 0 for x in games)}
+
+
+def yardage_ranks(summaries, fbs_ids):
+    """FBS rank for each stat; 1 = best (most yards gained, fewest allowed)."""
+    pool = {t: s for t, s in summaries.items() if t in fbs_ids and s}
+    ranks = {t: {} for t in pool}
+    for key, best_high in (('ypg', True), ('ypg_allowed', False), ('ypp', True), ('ypp_allowed', False)):
+        values = [s[key] for s in pool.values() if s[key] is not None]
+        for t, s in pool.items():
+            if s[key] is not None:
+                ranks[t][key] = 1 + sum(v > s[key] if best_high else v < s[key] for v in values)
+    return ranks, len(pool)
+
+
+def yardage_block(summary, ranks, population):
+    if not summary:
+        return ''
+
+    def rk(key):
+        r = ranks.get(key)
+        return f' <i>#{r}</i>' if r else ''
+
+    def num(v, fmt):
+        return '—' if v is None else format(v, fmt)
+
+    margin = summary['gained'] - summary['lost']
+    margin_text = ('+' if margin > 0 else '') + str(margin)
+    return (f'<div class="yardage">Yards/game <b>{num(summary["ypg"], ".0f")}</b>{rk("ypg")} · '
+            f'allowed <b>{num(summary["ypg_allowed"], ".0f")}</b>{rk("ypg_allowed")}<br>'
+            f'Yards/play <b>{num(summary["ypp"], ".1f")}</b>{rk("ypp")} · '
+            f'allowed <b>{num(summary["ypp_allowed"], ".1f")}</b>{rk("ypp_allowed")}<br>'
+            f'Turnovers <b>{margin_text}</b> ({summary["gained"]} forced, {summary["lost"]} lost)'
+            f'<small>{summary["games"]} games this season · raw, not opponent-adjusted'
+            f'{f" · # = rank of {population} FBS" if ranks else ""}</small></div>')
+
+
+def qb_change_note(log, before_date, team_names):
+    """Pre-kickoff read: did the team's most recent game have a different starter than
+    the QB who started most of its games before that? Starter = most pass attempts."""
+    prior = [x for x in (log or []) if x['date'] < before_date and x['qb_id']]
+    if len(prior) < 2:
+        return None
+    last, earlier = prior[-1], prior[:-1]
+    counts = {}
+    for x in earlier:
+        counts[x['qb_id']] = counts.get(x['qb_id'], 0) + 1
+    primary = max(counts, key=lambda q: (counts[q], max(i for i, x in enumerate(earlier) if x['qb_id'] == q)))
+    if last['qb_id'] == primary:
+        return None
+    primary_name = next(x['qb_name'] for x in earlier if x['qb_id'] == primary)
+    opp = team_names.get(last['opp_id'], 'last opponent')
+    return (f"QB change: {last['qb_name']} started last game (vs {opp}) — "
+            f"{primary_name} had started {counts[primary]} of {len(earlier)} before that")
 
 
 def weather_text(w, indoor):
@@ -223,6 +446,15 @@ def model_detail(g, proj):
     if proj['talent_margin_shift'] is not None:
         effect = toward(proj['talent_margin_shift']) if abs(proj['talent_margin_shift'] or 0) >= 0.25 else 'under half a point'
         rows.append(f'<div>Roster talent prior: <b>{effect}</b></div>')
+    qb = proj.get('injury_margin_shift') or 0
+    if qb:
+        rows.append(f'<div>Starting QB out: <b>{toward(qb)}</b>'
+                    f'<small>covers.com lists the starter Out or Doubtful. A fixed prior of {injury_prior.QB_OUT_POINTS:g} pts '
+                    f'(half if the backup already started last game); graded with and without it.</small></div>')
+    hand = proj.get('manual_margin_shift') or 0
+    if hand:
+        rows.append(f'<div>Your adjustment: <b>{toward(hand)}</b>'
+                    f'<small>From manual_adjustments.csv. The record is graded with and without it.</small></div>')
     pooled = json.loads(proj['pooled_fcs_json']) if proj.get('pooled_fcs_json') else []
     if pooled:
         who = ' and '.join(esc(g[f'{s}_name']) for s in pooled)
@@ -436,18 +668,76 @@ def projection_block(g, proj):
             f'<div>Difference vs market: {diff_label}</div>{score_line}</div>')
 
 
-def matchup_card(g, home_notes, away_notes, home_rating, away_rating, w, proj, splits, season_games, kalshi=None):
+def matchup_card(g, home_notes, away_notes, home_rating, away_rating, w, proj, splits, season_games, kalshi=None,
+                 yardage=None, efficiency=None, roster=None):
+    yardage = yardage or {}
+    efficiency = efficiency or {}
+    roster = roster or {}
     home_side = (f'<div class="home">{team_title(g, "home")}{grades_block(home_rating, season_games.get(g["home_id"], 0))}'
+                 f'{yardage.get("home", "")}{efficiency.get("home", "")}{roster.get("home", "")}'
                  f'<div class="stadium">{esc(g["venue_name"] or "Venue unavailable")}</div>{weather_text(w, g["indoor"])}'
                  f'{notes_block(home_notes)}</div>')
     away_side = (f'<div class="away">{team_title(g, "away")}{grades_block(away_rating, season_games.get(g["away_id"], 0))}'
-                 f'{notes_block(away_notes)}</div>')
+                 f'{yardage.get("away", "")}{efficiency.get("away", "")}{roster.get("away", "")}{notes_block(away_notes)}</div>')
     status = f' · {esc(g["status"])}' if g['status'] and g['status'] != 'Scheduled' else ''
     market_source = esc(g['odds_status'] if g['home_spread'] is None else g['market_source'])
     market = (f'<div class="market"><div class="kickoff"><b>{esc(time_label(g["kickoff"]))}</b>{status}</div>'
               f'<div class="total">O/U {half(g["total"])}</div>{lean_line(g, proj)}{projection_block(g, proj)}'
               f'{model_detail(g, proj)}{split_block(g, splits)}{kalshi_block(g, kalshi)}<div class="market-source">{market_source}</div></div>')
     return f'<article class="match" id="g{esc(g["game_id"])}">{weather_alert_block(w)}{home_side}{market}{away_side}</article>'
+
+
+def sharp_card(rows, rec, page_game_ids):
+    """The straight-bet list: sides where DraftKings' money share beats its ticket
+    share by SHARP_GAP+. Logged at first sighting, graded as games finish."""
+    def pick_name(r):
+        return r['hn'] if r['side'] == 'home' else r['an']
+
+    def opp_name(r):
+        return r['an'] if r['side'] == 'home' else r['hn']
+
+    def spread(v):
+        return '—' if v is None else ('PK' if v == 0 else f'{v:+g}')
+
+    body = []
+    for r in sorted(rows, key=lambda x: (x['completed'], -(x['gap'] or 0))):
+        strong = (r['gap'] or 0) >= 20
+        res = ''
+        if r['su_result']:
+            res = (f'<span class="{"win" if r["su_result"] == "win" else "loss"}">{r["su_result"].upper()} SU</span> · '
+                   f'<span class="{"win" if r["ats_result"] == "win" else ("loss" if r["ats_result"] == "loss" else "")}">{(r["ats_result"] or "—").upper()} ATS</span>'
+                   f' <small>({r["home_score"]}–{r["away_score"]})</small>')
+        elif r['completed']:
+            res = 'grading…'
+        else:
+            res = esc(time_label(r['kickoff']))
+        move = r['line_move']
+        move_txt = '—' if move is None else (f'<b class="win">{move:+g} toward</b>' if move >= sharp_side.MOVE_FLAG else
+                                             (f'<span class="loss">{move:+g} against</span>' if move <= -sharp_side.MOVE_FLAG else f'{move:+g}'))
+        link = f'<a href="#g{esc(r["game_id"])}">' if r['game_id'] in page_game_ids else '<span>'
+        close_link = '</a>' if r['game_id'] in page_game_ids else '</span>'
+        now_line = spread(r['home_spread'] if r['side'] == 'home' else (None if r['home_spread'] is None else -r['home_spread']))
+        body.append(
+            f'<tr class="{"strong" if strong else ""}{" done" if r["su_result"] else ""}">'
+            f'<td>{link}<b>{esc(pick_name(r))}</b>{close_link}<br><small>{"vs" if r["side"] == "home" else "at"} {esc(opp_name(r))}</small></td>'
+            f'<td>{r["gap"]:+.0f}<br><small>{r["last_handle_pct"]:.0f}% money / {r["last_bets_pct"]:.0f}% tickets</small></td>'
+            f'<td>{spread(r["spread_at_pick"])}<br><small>now {now_line}</small></td>'
+            f'<td>{move_txt}</td>'
+            f'<td>{"yes" if r["model_agrees"] else "no"}</td>'
+            f'<td>{res}</td></tr>')
+    rec_line = ''
+    if rec and rec['graded']:
+        rec_line = (f'<p class="sharp-rec">Season record of this list: <b>{rec["su"]} straight up ({rec["su_pct"]}%)</b> · '
+                    f'<b>{rec["ats"]} ATS</b> at the close · {rec["ats_at_pick"]} ATS at the line when first listed · {rec["graded"]} graded.</p>')
+    intro = ('<p class="muted" style="line-height:1.7">Sides where DraftKings’ <b>share of money beats its share of tickets by '
+             f'{sharp_side.SHARP_GAP:g}+ points</b>: a few big bets against many small ones. On 82 games this season before this list '
+             'existed, that side won <b>60% straight up</b> on lines near pick’em and covered 58%. Our own model lean went 47%. '
+             'Gaps of 20+ are highlighted. Each game is logged the first run it qualifies, with the line at that moment, and never removed, '
+             'so the record above is what you could have bet. Small sample so far; give it eight weeks before trusting it.</p>')
+    table = ('<div class="scroll"><table class="sharp"><thead><tr><th>Side</th><th>Money − tickets</th><th>Line when listed</th>'
+             '<th>Line move toward pick</th><th>Model agrees</th><th>Result / kickoff</th></tr></thead>'
+             f'<tbody>{"".join(body)}</tbody></table></div>') if body else '<div class="empty">No side has a 10-point money gap yet this week.</div>'
+    return f'<div class="card"><h2>Sharp Side — straight bets</h2>{rec_line}{intro}{table}</div>'
 
 
 def method_note(games, proj_by_game):
@@ -541,14 +831,44 @@ def render_week(season: int, week: int) -> Path:
         for r in con.execute('SELECT home_id, away_id FROM games WHERE season=? AND completed=1', (season,)):
             for tid in (r['home_id'], r['away_id']):
                 season_games[tid] = season_games.get(tid, 0) + 1
+        box_logs = season_box(con, season)
+        play_logs = season_plays(con, season)
+        injuries = injuries_by_team(con)
+        portal = transfers_ingest.summary(con, season)
+        sharp_rows = sharp_side.this_week(con, season, week)
+        sharp_rec = sharp_side.record(con, season)
+        fbs_ids = {r['team_id'] for r in con.execute('SELECT team_id FROM teams WHERE fbs=1')}
 
-    cards = ''.join(
-        matchup_card(g, notes_by_game.get((g['game_id'], 'home'), []), notes_by_game.get((g['game_id'], 'away'), []),
-                     ratings_by_team.get(g['home_id']), ratings_by_team.get(g['away_id']),
-                     weather_by_game.get(g['game_id']), proj_by_game.get(g['game_id']),
-                     splits_by_game.get(g['game_id']), season_games,
-                     kalshi_by_game.get(g['game_id']))
-        for g in games) or '<div class="empty">No Top 50 matchups this week.</div>'
+    summaries = {t: yardage_summary(log) for t, log in box_logs.items()}
+    yard_ranks, yard_population = yardage_ranks(summaries, fbs_ids)
+    eff_summaries = {t: efficiency_summary(log) for t, log in play_logs.items()}
+    eff_ranks, eff_population = efficiency_ranks(eff_summaries, fbs_ids)
+    qb_hits = injury_prior.load(season)
+    hand = manual.load(names=team_names)
+    all_fbs_rows = sorted((r for r in rating_rows if r['team_id'] in fbs_ids and r['rating'] is not None),
+                          key=lambda r: -(r['rating'] + hand['by_team'].get(r['team_id'], {}).get('points', 0.0)))
+
+    def card(g):
+        notes = {}
+        yardage = {}
+        efficiency = {}
+        roster = {}
+        for side in ('home', 'away'):
+            tid = g[f'{side}_id']
+            notes[side] = list(notes_by_game.get((g['game_id'], side), []))
+            qb = qb_change_note(box_logs.get(tid), g['game_date'], team_names)
+            if qb:
+                notes[side].insert(0, qb)
+            yardage[side] = yardage_block(summaries.get(tid), yard_ranks.get(tid, {}), yard_population)
+            efficiency[side] = efficiency_block(eff_summaries.get(tid), eff_ranks.get(tid, {}), eff_population)
+            roster[side] = roster_block(injuries.get(tid), portal.get(tid), qb_hits.get(tid))
+        return matchup_card(g, notes['home'], notes['away'],
+                            ratings_by_team.get(g['home_id']), ratings_by_team.get(g['away_id']),
+                            weather_by_game.get(g['game_id']), proj_by_game.get(g['game_id']),
+                            splits_by_game.get(g['game_id']), season_games,
+                            kalshi_by_game.get(g['game_id']), yardage, efficiency, roster)
+
+    cards = ''.join(card(g) for g in games) or '<div class="empty">No Top 50 matchups this week.</div>'
 
     now = datetime.now().astimezone()
     stamp = now.strftime('%b %d, %I:%M %p').replace(' 0', ' ')
@@ -565,9 +885,11 @@ def render_week(season: int, week: int) -> Path:
   <div><h1>NCAAF Handicap</h1><p class="tag">SEASON {season} · WEEK {week}</p></div>
   <div id="source" class="muted">Updated {esc(stamp)} · {len(games)} Top-50 matchups · times in {esc(now.tzname())}</div>
 </header>
+{sharp_card(sharp_rows, sharp_rec, {g['game_id'] for g in games})}
 {method_note(games, proj_by_game)}
 <div class="card"><h2>This Week</h2><div class="match-list">{cards}</div></div>
-<div class="card"><h2>Power Ranking</h2>{_render_power_table(power_rows, team_names)}</div>
+<div class="card"><h2>Power Ranking</h2>{_render_power_table(power_rows, team_names, hand, qb_hits)}</div>
+<div class="card"><h2>Every FBS Team by Model Rating</h2>{_render_hand_note(hand)}{_render_all_fbs_table(all_fbs_rows, team_names, hand, season_games, qb_hits, eff_summaries, eff_ranks, portal)}</div>
 <footer class="muted" style="font-size:11px;margin-top:24px;line-height:1.7">
   Confidence rates trust in the projection, not the quality of a bet, and is not a calibrated cover
   probability. This model has not beaten the closing line in walk-forward testing. See README.md.
@@ -579,7 +901,37 @@ def render_week(season: int, week: int) -> Path:
     return OUT_PATH
 
 
-def _render_power_table(rows, team_names):
+def _nudge_cell(hand, team_id):
+    a = (hand or {}).get('by_team', {}).get(team_id)
+    if not a or not a['points']:
+        return '<td class="muted">—</td>'
+    cls = 'win' if a['points'] > 0 else 'loss'
+    note = f' title="{esc(a["note"])}"' if a.get('note') else ''
+    return f'<td class="{cls}"{note}>{a["points"]:+.1f}</td>'
+
+
+def _render_hand_note(hand):
+    n = len((hand or {}).get('by_team', {}))
+    bad = (hand or {}).get('unmatched', [])
+    text = (f'{n} team(s) carry your adjustment from manual_adjustments.csv.' if n else
+            'No manual adjustments in play. Edit manual_adjustments.csv in the project folder (team, points, note) '
+            'to nudge a team up or down; the next hourly run applies it.')
+    if bad:
+        text += ' Not matched to an FBS team: ' + ', '.join(esc(b) for b in bad) + '.'
+    return (f'<p class="muted" style="line-height:1.7">{text} Rating is points better than an average FBS team on a '
+            'neutral field. The nudge is added to every game that team plays and the record is graded with and '
+            'without it, so the backtest report can tell whether your hand is helping.</p>')
+
+
+def _qb_cell(qb_hits, team_id):
+    hit = (qb_hits or {}).get(team_id)
+    if not hit:
+        return '<td class="muted">—</td>'
+    cls = 'loss' if hit['severity'] == 'out' else ''
+    return f'<td class="{cls}" title="{esc(hit["note"])}">{esc(hit["status"])}: {esc(hit["player"])}</td>'
+
+
+def _render_power_table(rows, team_names, hand=None, qb_hits=None):
     if not rows:
         return '<div class="empty">No power ratings yet this season.</div>'
     body = []
@@ -587,15 +939,55 @@ def _render_power_table(rows, team_names):
         body.append(
             f"<tr><td>{t['power_rank']}</td><td>{esc(team_names.get(t['team_id'], t['team_id']))}</td>"
             f"<td class=\"{trend_class(t['trend'])}\">{trend_text(t['trend'])}</td>"
-            f"<td>{half(t['rating'])}</td>"
+            f"<td>{half(t['rating'])}</td>{_nudge_cell(hand, t['team_id'])}{_qb_cell(qb_hits, t['team_id'])}"
             f"<td>{('#'+str(t['offense_rank'])) if t['offense_rank'] else '—'}{(' ('+t['offense_grade']+')') if t['offense_grade'] else ''}</td>"
             f"<td>{('#'+str(t['defense_rank'])) if t['defense_rank'] else '—'}{(' ('+t['defense_grade']+')') if t['defense_grade'] else ''}</td>"
             f"<td>{t['games']}</td>"
             f"<td>{('#'+str(t['ap_rank'])) if t['ap_rank'] else '—'}</td>"
             f"<td>#{t['combined_rank']}</td></tr>")
-    return ('<div class="scroll"><table><thead><tr><th>#</th><th>Team</th><th>Trend</th><th>Rating</th>'
-            '<th>Offense</th><th>Defense</th><th>Games</th><th>AP</th><th>Combined</th></tr></thead>'
+    return ('<div class="scroll"><table><thead><tr><th>#</th><th>Team</th><th>Trend</th><th>Rating</th><th>Your nudge</th>'
+            '<th>Starting QB</th><th>Offense</th><th>Defense</th><th>Games</th><th>AP</th><th>Combined</th></tr></thead>'
             f'<tbody>{"".join(body)}</tbody></table></div>')
+
+
+def _render_all_fbs_table(rows, team_names, hand, season_games, qb_hits=None, eff=None, eff_ranks=None, portal=None):
+    """Every rated FBS team, sorted by model rating plus your nudge, so a hand
+    adjustment can be judged against the whole list and not just the Top 50."""
+    if not rows:
+        return '<div class="empty">No ratings yet this season.</div>'
+    by = (hand or {}).get('by_team', {})
+    eff = eff or {}
+    eff_ranks = eff_ranks or {}
+    portal = portal or {}
+    body = []
+    for i, t in enumerate(rows, 1):
+        tid = t['team_id']
+        nudge = by.get(tid, {}).get('points', 0.0)
+        adjusted = t['rating'] + nudge
+        e = eff.get(tid) or {}
+        rk = eff_ranks.get(tid, {})
+        sr = f"{100 * e['sr']:.0f}% <i class=\"muted\">#{rk.get('sr', '—')}</i>" if e.get('sr') is not None else '—'
+        sra = f"{100 * e['sr_allowed']:.0f}% <i class=\"muted\">#{rk.get('sr_allowed', '—')}</i>" if e.get('sr_allowed') is not None else '—'
+        p = portal.get(tid)
+        if p:
+            net_cls = 'win' if p['net_rating'] > 0.5 else ('loss' if p['net_rating'] < -0.5 else '')
+            port = f"<span class=\"{net_cls}\">{p['net_rating']:+.1f}</span> <i class=\"muted\">({p['in_n']} in / {p['out_n']} out)</i>"
+        else:
+            port = '—'
+        body.append(
+            f"<tr><td>{i}</td><td>{esc(team_names.get(tid, tid))}</td>"
+            f"<td>{half(t['rating'])}</td>{_nudge_cell(hand, tid)}"
+            f"<td><b>{half(adjusted)}</b></td>{_qb_cell(qb_hits, tid)}"
+            f"<td>{('#'+str(t['offense_rank'])) if t['offense_rank'] else '—'}{(' ('+t['offense_grade']+')') if t['offense_grade'] else ''}</td>"
+            f"<td>{('#'+str(t['defense_rank'])) if t['defense_rank'] else '—'}{(' ('+t['defense_grade']+')') if t['defense_grade'] else ''}</td>"
+            f"<td>{sr}</td><td>{sra}</td><td>{port}</td>"
+            f"<td>{season_games.get(tid, 0)}</td>"
+            f"<td>{('#'+str(t['ap_rank'])) if t['ap_rank'] else '—'}</td></tr>")
+    return ('<details><summary>Show all ' + str(len(rows)) + ' teams</summary><div class="scroll"><table><thead><tr>'
+            '<th>#</th><th>Team</th><th>Model rating</th><th>Your nudge</th><th>Adjusted</th><th>Starting QB</th>'
+            '<th>Offense</th><th>Defense</th><th>Success rate</th><th>Allowed</th><th>Portal net</th>'
+            '<th>Games this season</th><th>AP</th></tr></thead>'
+            f'<tbody>{"".join(body)}</tbody></table></div></details>')
 
 
 if __name__ == '__main__':

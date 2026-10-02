@@ -1,0 +1,6 @@
+team,points,note,until
+# One row per team. points = margin added to that team in every game (positive = better than the model says).
+# A starting QB out is usually -4 to -7. "A hair" is 0.5 to 1.5. Caps at +/-10. Blank until = rest of season.
+# Examples (remove the leading # to use):
+# Ohio State,1,Dominated on yards; score flattered Penn State,
+# Texas,-5,Starting QB out (ankle),2026-10-20

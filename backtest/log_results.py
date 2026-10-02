@@ -92,21 +92,31 @@ def log_season(season: int) -> int:
             ats, edge = _ats_result(graded, closing_spread, g['home_score'], g['away_score'])
             ou = _ou_result(s['projected_total'], closing_total, g['home_score'], g['away_score'])
             pooled = 1 if json.loads(s['pooled_fcs_json'] or '[]') else 0
+            # Your hand (manual_adjustments.csv) sits inside the graded number. A manual
+            # shift of +m points toward the home team made the home spread m more
+            # negative, so the model-alone number is graded + m. Graded both ways.
+            hand = (s['manual_margin_shift'] if 'manual_margin_shift' in s.keys() else None) or 0.0
+            ats_model = ats if not hand or graded is None else _ats_result(
+                round(graded + hand, 2), closing_spread, g['home_score'], g['away_score'])[0]
+            qb = (s['injury_margin_shift'] if 'injury_margin_shift' in s.keys() else None) or 0.0
             con.execute(
                 """INSERT INTO backtest_log (game_id, season, week, predicted_spread, closing_spread, error_spread,
                         predicted_total, closing_total, error_total, ats_result, ou_result, confidence,
-                        graded_spread, edge_points, pooled_fcs, generated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        graded_spread, edge_points, pooled_fcs, generated_at, manual_margin_shift, ats_result_model,
+                        injury_margin_shift)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(game_id) DO UPDATE SET
+                       injury_margin_shift=excluded.injury_margin_shift,
                        predicted_spread=excluded.predicted_spread, closing_spread=excluded.closing_spread,
                        error_spread=excluded.error_spread, predicted_total=excluded.predicted_total,
                        closing_total=excluded.closing_total, error_total=excluded.error_total,
                        ats_result=excluded.ats_result, ou_result=excluded.ou_result, confidence=excluded.confidence,
                        graded_spread=excluded.graded_spread, edge_points=excluded.edge_points,
-                       pooled_fcs=excluded.pooled_fcs, generated_at=excluded.generated_at""",
+                       pooled_fcs=excluded.pooled_fcs, generated_at=excluded.generated_at,
+                       manual_margin_shift=excluded.manual_margin_shift, ats_result_model=excluded.ats_result_model""",
                 (g['game_id'], g['season'], g['week'], s['fair_home_spread'], closing_spread, error_spread,
                  s['projected_total'], closing_total, error_total, ats, ou, s['confidence'],
-                 graded, edge, pooled, s['generated_at']))
+                 graded, edge, pooled, s['generated_at'], hand, ats_model, qb))
             n += 1
         con.commit()
     return n
