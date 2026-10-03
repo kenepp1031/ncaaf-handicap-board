@@ -63,6 +63,7 @@ td{padding:12px 8px;border-bottom:1px solid var(--row-border)}
 .weather small{font-size:10px}
 .market{text-align:center}.kickoff{font-size:12px;color:var(--muted);margin-bottom:9px}.kickoff b{color:var(--ink)}
 .total{font-size:13px;font-weight:700;margin-bottom:9px;color:var(--total)}
+.market-line{font-size:15px;margin-bottom:6px;line-height:1.5}.market-line b{color:var(--ink)}.market-line small{font-size:11px;color:var(--muted)}
 .market-source{font-size:10px;color:var(--muted2);margin-top:8px}
 .split{margin-top:10px;text-align:left}
 .split-label{font-size:9px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--muted2);text-align:center;margin-bottom:4px}
@@ -668,8 +669,24 @@ def projection_block(g, proj):
             f'<div>Difference vs market: {diff_label}</div>{score_line}</div>')
 
 
+def market_line_block(g, line_open):
+    """The spread as the book has it now, and where it opened if it has moved."""
+    if g['home_spread'] is None:
+        return ''
+    fav = 'home' if g['home_spread'] < 0 else 'away'
+    now = f"{esc(g[f'{fav}_name'])} {spread_text(side_spread(g, fav))}" if g['home_spread'] != 0 else 'Pick’em'
+    opened = ''
+    if line_open is not None and abs(line_open - g['home_spread']) >= 0.5:
+        open_fav = 'home' if line_open < 0 else 'away'
+        open_val = line_open if open_fav == 'home' else -line_open
+        opened = (f'<br><small>opened {esc(g[f"{open_fav}_name"])} {spread_text(open_val)}' if line_open != 0 else '<br><small>opened Pick’em')
+        moved_to = 'home' if line_open - g['home_spread'] > 0 else 'away'
+        opened += f' · moved {abs(line_open - g["home_spread"]):g} toward {esc(g[f"{moved_to}_name"])}</small>'
+    return f'<div class="market-line">Line: <b>{now}</b>{opened}</div>'
+
+
 def matchup_card(g, home_notes, away_notes, home_rating, away_rating, w, proj, splits, season_games, kalshi=None,
-                 yardage=None, efficiency=None, roster=None):
+                 yardage=None, efficiency=None, roster=None, line_open=None):
     yardage = yardage or {}
     efficiency = efficiency or {}
     roster = roster or {}
@@ -682,7 +699,7 @@ def matchup_card(g, home_notes, away_notes, home_rating, away_rating, w, proj, s
     status = f' · {esc(g["status"])}' if g['status'] and g['status'] != 'Scheduled' else ''
     market_source = esc(g['odds_status'] if g['home_spread'] is None else g['market_source'])
     market = (f'<div class="market"><div class="kickoff"><b>{esc(time_label(g["kickoff"]))}</b>{status}</div>'
-              f'<div class="total">O/U {half(g["total"])}</div>{lean_line(g, proj)}{projection_block(g, proj)}'
+              f'{market_line_block(g, line_open)}<div class="total">O/U {half(g["total"])}</div>{lean_line(g, proj)}{projection_block(g, proj)}'
               f'{model_detail(g, proj)}{split_block(g, splits)}{kalshi_block(g, kalshi)}<div class="market-source">{market_source}</div></div>')
     return f'<article class="match" id="g{esc(g["game_id"])}">{weather_alert_block(w)}{home_side}{market}{away_side}</article>'
 
@@ -711,9 +728,6 @@ def sharp_card(rows, rec, page_game_ids):
             res = 'grading…'
         else:
             res = esc(time_label(r['kickoff']))
-        move = r['line_move']
-        move_txt = '—' if move is None else (f'<b class="win">{move:+g} toward</b>' if move >= sharp_side.MOVE_FLAG else
-                                             (f'<span class="loss">{move:+g} against</span>' if move <= -sharp_side.MOVE_FLAG else f'{move:+g}'))
         link = f'<a href="#g{esc(r["game_id"])}">' if r['game_id'] in page_game_ids else '<span>'
         close_link = '</a>' if r['game_id'] in page_game_ids else '</span>'
         now_line = spread(r['home_spread'] if r['side'] == 'home' else (None if r['home_spread'] is None else -r['home_spread']))
@@ -722,7 +736,6 @@ def sharp_card(rows, rec, page_game_ids):
             f'<td>{link}<b>{esc(pick_name(r))}</b>{close_link}<br><small>{"vs" if r["side"] == "home" else "at"} {esc(opp_name(r))}</small></td>'
             f'<td>{r["gap"]:+.0f}<br><small>{r["last_handle_pct"]:.0f}% money / {r["last_bets_pct"]:.0f}% tickets</small></td>'
             f'<td>{spread(r["spread_at_pick"])}<br><small>now {now_line}</small></td>'
-            f'<td>{move_txt}</td>'
             f'<td>{"yes" if r["model_agrees"] else "no"}</td>'
             f'<td>{res}</td></tr>')
     rec_line = ''
@@ -735,7 +748,7 @@ def sharp_card(rows, rec, page_game_ids):
              'Gaps of 20+ are highlighted. Each game is logged the first run it qualifies, with the line at that moment, and never removed, '
              'so the record above is what you could have bet. Small sample so far; give it eight weeks before trusting it.</p>')
     table = ('<div class="scroll"><table class="sharp"><thead><tr><th>Side</th><th>Money − tickets</th><th>Line when listed</th>'
-             '<th>Line move toward pick</th><th>Model agrees</th><th>Result / kickoff</th></tr></thead>'
+             '<th>Model agrees</th><th>Result / kickoff</th></tr></thead>'
              f'<tbody>{"".join(body)}</tbody></table></div>') if body else '<div class="empty">No side has a 10-point money gap yet this week.</div>'
     return f'<div class="card"><h2>Sharp Side — straight bets</h2>{rec_line}{intro}{table}</div>'
 
@@ -866,7 +879,8 @@ def render_week(season: int, week: int) -> Path:
                             ratings_by_team.get(g['home_id']), ratings_by_team.get(g['away_id']),
                             weather_by_game.get(g['game_id']), proj_by_game.get(g['game_id']),
                             splits_by_game.get(g['game_id']), season_games,
-                            kalshi_by_game.get(g['game_id']), yardage, efficiency, roster)
+                            kalshi_by_game.get(g['game_id']), yardage, efficiency, roster,
+                            line_span.get(g['game_id'], [None])[0])
 
     cards = ''.join(card(g) for g in games) or '<div class="empty">No Top 50 matchups this week.</div>'
 
